@@ -43,6 +43,8 @@ def main():
         session = request('/api/auth/session')
         course = request('/api/courses', {'name':'Deployment persistence'}, session['csrf_token'])
         run('restart', name)
+        # Docker can reassign an ephemeral host port when restarting the container.
+        base = 'http://' + run('port', name, '8765/tcp').splitlines()[0]
         healthy()
         courses = request('/api/courses')
         assert any(item['id'] == course['id'] for item in courses)
