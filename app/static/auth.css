@@ -1,0 +1,39 @@
+/* The signed-out view shares the workspace's typography and appearance controls. */
+.auth-gate { min-height: 100svh; display: flex; flex-direction: column; background: var(--quiet); padding: 28px 40px 44px; }
+.auth-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.auth-header .identity { margin: 0; }
+.auth-header .appearance-controls { flex-shrink: 0; }
+.auth-card { width: min(100%, 440px); margin: auto; padding: 42px 40px; background: white; border-radius: 20px; box-shadow: var(--edge), 0 14px 48px rgb(20 30 40 / .04); }
+.auth-card h1 { font-size: 1.75rem; letter-spacing: -.035em; }
+.auth-description { margin: 12px 0 28px; font-size: .84rem; }
+.auth-card form { display: grid; gap: 18px; }
+.auth-card label { display: block; font-size: .8rem; margin: 0; }
+.auth-card input { min-height: 46px; font-size: 1rem; }
+.auth-card .auth-hint { display: block; margin-top: 7px; font-size: .73rem; line-height: 1.5; color: var(--secondary); }
+.auth-submit { width: 100%; margin-top: 4px; min-height: 46px; font-size: .85rem; }
+.auth-switch { display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 6px; padding-top: 24px; font-size: .79rem; color: var(--secondary); }
+.auth-switch button { font-size: inherit; }
+.auth-card .error-message { margin: 0; }
+.auth-card .auth-message { margin: 0 0 20px; padding: 12px 14px; background: var(--blue-soft); border-radius: 9px; font-size: .8rem; color: var(--text); }
+.auth-loading { padding-top: 16px; }
+.auth-noscript { text-align: center; padding-top: 20px; }
+.account-button { min-width: 36px; min-height: 36px; gap: 8px; padding: 4px 8px; }
+#account-initial { width: 27px; height: 27px; border-radius: 50%; background: var(--blue-soft); color: var(--blue); display: inline-flex; align-items: center; justify-content: center; font-size: .75rem; font-weight: 600; }
+#account-name { max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .74rem; }
+.account-details { margin: 12px 0 22px; }
+.account-details strong { display: block; overflow-wrap: anywhere; }
+.auth-card [aria-busy=true] { cursor: progress; }
+html[data-theme=dark] .auth-gate { background: #171e1b; }
+html[data-theme=dark] .auth-card { background: #212b25; box-shadow: 0 0 0 1px #354039, 0 14px 48px #0002; }
+@media(max-width:720px) {
+  .auth-gate { padding: 22px 20px 36px; }
+  .auth-card { padding: 32px 24px; margin: auto; }
+  .auth-header { margin-bottom: 38px; }
+  .auth-header .identity>span { font-size: 1.2rem; }
+  .auth-header .identity>img { width: 25px; height: 25px; }
+  .auth-card h1 { font-size: 1.6rem; }
+  #account-name { display: none; }
+  .account-button { padding: 4px; min-width: 40px; min-height: 40px; }
+}
+@media(max-height:700px) { .auth-card { margin: 36px auto 0; } }
+@media(prefers-contrast:more) { .auth-card { outline: 1px solid var(--secondary); } }

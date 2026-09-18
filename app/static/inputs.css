@@ -1,0 +1,401 @@
+/* Quiet writing surfaces and native controls share the same material. */
+:root {
+  --field-fill: rgb(235 242 234 / .62);
+  --field-focus-fill: rgb(252 254 250 / .97);
+  --field-border: rgb(75 105 85 / .15);
+  --field-rim: rgb(255 255 255 / .85);
+  --field-focus-border: #799987;
+  --field-focus-halo: rgb(103 142 117 / .12);
+  --field-placeholder: #738078;
+  --field-disabled: #e9eee8;
+  --stepper-hover: rgb(76 111 87 / .09);
+  --stepper-press: rgb(76 111 87 / .15);
+}
+
+html[data-theme="dark"] {
+  --field-fill: rgb(69 87 73 / .25);
+  --field-focus-fill: rgb(63 83 69 / .46);
+  --field-border: rgb(171 199 179 / .18);
+  --field-rim: rgb(232 249 237 / .045);
+  --field-focus-border: #91b49c;
+  --field-focus-halo: rgb(157 193 169 / .1);
+  --field-placeholder: #9bac9f;
+  --field-disabled: #2b352e;
+  --stepper-hover: rgb(189 219 198 / .09);
+  --stepper-press: rgb(189 219 198 / .16);
+}
+
+input:is(:not([type]), [type="text"], [type="search"], [type="number"], [type="email"], [type="url"], [type="password"]),
+textarea,
+.select-field select,
+.difficulty-controls select,
+.difficulty-evaluation select,
+#evaluation select,
+.library-course select,
+dialog select,
+html[data-theme="dark"] input:is(:not([type]), [type="text"], [type="search"], [type="number"], [type="email"], [type="url"], [type="password"]),
+html[data-theme="dark"] textarea,
+html[data-theme="dark"] .writing-field textarea,
+html[data-theme="dark"] .search input,
+html[data-theme="dark"] .select-field select,
+html[data-theme="dark"] .difficulty-controls select,
+html[data-theme="dark"] .difficulty-evaluation select,
+html[data-theme="dark"] .library-course select,
+html[data-theme="dark"] dialog select {
+  min-height: 44px;
+  padding: 11px 14px;
+  border: 1px solid var(--field-border);
+  border-radius: 13px;
+  background: var(--field-fill);
+  color: var(--text);
+  box-shadow: inset 0 1px 0 var(--field-rim);
+  font-size: .86rem;
+  font-weight: 400;
+  transition: border-color 130ms ease, background-color 130ms ease, box-shadow 130ms ease;
+}
+
+input::placeholder,
+textarea::placeholder,
+html[data-theme="dark"] input::placeholder,
+html[data-theme="dark"] textarea::placeholder {
+  color: var(--field-placeholder);
+  opacity: 1;
+}
+
+input:is(:not([type]), [type="text"], [type="search"], [type="number"], [type="email"], [type="url"], [type="password"]):focus,
+textarea:focus,
+.writing-field textarea:focus,
+.select-field select:focus,
+.difficulty-controls select:focus,
+.difficulty-evaluation select:focus,
+#evaluation select:focus,
+.library-course select:focus,
+dialog select:focus,
+html[data-theme="dark"] input:is(:not([type]), [type="text"], [type="search"], [type="number"], [type="email"], [type="url"], [type="password"]):focus,
+html[data-theme="dark"] textarea:focus,
+html[data-theme="dark"] .writing-field textarea:focus,
+html[data-theme="dark"] .search input:focus,
+html[data-theme="dark"] .select-field select:focus,
+html[data-theme="dark"] .difficulty-controls select:focus,
+html[data-theme="dark"] .difficulty-evaluation select:focus,
+html[data-theme="dark"] .library-course select:focus,
+html[data-theme="dark"] dialog select:focus {
+  background: var(--field-focus-fill);
+  border-color: var(--field-focus-border);
+  box-shadow: inset 0 1px 0 var(--field-rim), 0 0 0 3px var(--field-focus-halo);
+}
+
+input:is(:not([type]), [type="text"], [type="search"], [type="number"], [type="email"], [type="url"], [type="password"]):disabled,
+textarea:disabled,
+.select-field select:disabled,
+.difficulty-controls select:disabled,
+.difficulty-evaluation select:disabled,
+.library-course select:disabled,
+dialog select:disabled,
+html[data-theme="dark"] input:is(:not([type]), [type="text"], [type="search"], [type="number"], [type="email"], [type="url"], [type="password"]):disabled,
+html[data-theme="dark"] textarea:disabled,
+html[data-theme="dark"] .select-field select:disabled,
+html[data-theme="dark"] .difficulty-controls select:disabled,
+html[data-theme="dark"] .difficulty-evaluation select:disabled,
+html[data-theme="dark"] .library-course select:disabled,
+html[data-theme="dark"] dialog select:disabled {
+  background: var(--field-disabled);
+  color: var(--secondary);
+  cursor: not-allowed;
+}
+
+/* Keep a separate, visible keyboard outline alongside the material response. */
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+html[data-theme="dark"] input:focus-visible,
+html[data-theme="dark"] textarea:focus-visible,
+html[data-theme="dark"] select:focus-visible {
+  outline-width: 2px;
+  outline-offset: 3px;
+  outline-color: var(--field-focus-border);
+}
+
+.writing-field { margin-top: 24px; }
+.writing-field > label {
+  margin: 0 0 10px;
+  color: var(--secondary);
+  font-size: .76rem;
+  font-weight: 500;
+}
+.writing-field textarea,
+html[data-theme="dark"] .writing-field textarea {
+  min-height: 152px;
+  max-height: 420px;
+  margin-top: 0;
+  padding: 19px 21px;
+  border-radius: 18px;
+  border: 1px solid var(--field-border);
+  background: var(--field-fill);
+  box-shadow: inset 0 1px 0 var(--field-rim);
+  font-size: .95rem;
+  line-height: 1.85;
+  letter-spacing: .005em;
+}
+textarea[data-autosize] {
+  min-height: 84px;
+  max-height: 320px;
+  resize: none;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+.writing-field textarea[data-autosize] {
+  min-height: 152px;
+  max-height: 420px;
+}
+.learner-profile textarea,
+html[data-theme="dark"] .learner-profile textarea {
+  min-height: 84px;
+  padding: 14px 16px;
+  line-height: 1.8;
+}
+
+.compose-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 14px;
+  margin-top: 21px;
+}
+.compose-form .compose-options .field-grid,
+.compose-options #lesson-difficulty-options { display: contents; }
+.compose-options .select-field,
+.compose-options .number-field {
+  flex: 1 1 150px;
+  min-width: 0;
+  color: var(--secondary);
+  font-size: .74rem;
+}
+.compose-options .number-field { flex: 0 1 146px; }
+.number-field > label { margin: 0; color: var(--secondary); font-size: .74rem; }
+.compose-options .select-field { margin: 0; }
+.select-field select { width: 100%; text-overflow: ellipsis; }
+.compose-options .select-field select { margin-top: 7px; }
+.difficulty-controls { margin-top: 24px; padding-top: 22px; }
+.difficulty-controls legend { color: var(--secondary); font-size: .76rem; }
+.difficulty-controls .select-field { max-width: 280px; }
+.difficulty-mode { gap: 4px; }
+.difficulty-mode label {
+  min-height: 44px;
+  padding: 9px 12px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  color: var(--secondary);
+  font-size: .78rem;
+}
+.difficulty-mode label:has(input:checked) {
+  border-color: var(--field-border);
+  background: var(--field-fill);
+  color: var(--text);
+}
+.difficulty-mode label:has(input:focus-visible) {
+  outline: 2px solid var(--field-focus-border);
+  outline-offset: 2px;
+}
+.difficulty-counts { gap: 14px; }
+.difficulty-counts .number-field { margin: 12px 0; }
+.difficulty-counts .number-field > label { margin: 0; }
+.difficulty-presets button,
+html[data-theme="dark"] .difficulty-presets button {
+  min-height: 44px;
+  padding: 9px 12px;
+  border-radius: 11px;
+  font-size: .73rem;
+}
+
+.number-stepper {
+  display: flex;
+  align-items: center;
+  width: min(100%, 156px);
+  min-height: 46px;
+  margin-top: 7px;
+  padding: 0 1px;
+  border: 1px solid var(--field-border);
+  border-radius: 13px;
+  background: var(--field-fill);
+  box-shadow: inset 0 1px 0 var(--field-rim);
+  transition: border-color 130ms ease, background-color 130ms ease, box-shadow 130ms ease;
+}
+.number-stepper:focus-within {
+  background: var(--field-focus-fill);
+  border-color: var(--field-focus-border);
+  box-shadow: inset 0 1px 0 var(--field-rim), 0 0 0 3px var(--field-focus-halo);
+}
+.number-stepper input[type="number"],
+.number-stepper input[type="number"]:focus,
+html[data-theme="dark"] .number-stepper input[type="number"],
+html[data-theme="dark"] .number-stepper input[type="number"]:focus {
+  flex: 1 1 32px;
+  min-width: 24px;
+  width: 32px;
+  min-height: 44px;
+  margin: 0;
+  padding: 8px 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text);
+  font-size: .88rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.number-stepper input[type="number"]::-webkit-inner-spin-button,
+.number-stepper input[type="number"]::-webkit-outer-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+.number-stepper input[type="number"]:focus-visible { outline-offset: -4px; }
+.number-stepper button.stepper-button,
+html[data-theme="dark"] .number-stepper button.stepper-button {
+  flex: 0 0 44px;
+  width: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 11px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--secondary);
+  font-size: 1.13rem;
+  font-weight: 400;
+  line-height: 1;
+  transform: none;
+  transition: background-color 100ms ease, color 100ms ease;
+}
+.number-stepper button.stepper-button:active:not(:disabled):not([aria-disabled="true"]),
+html[data-theme="dark"] .number-stepper button.stepper-button:active:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--stepper-press);
+  color: var(--text);
+  transform: none;
+}
+.number-stepper button.stepper-button:disabled,
+.number-stepper button.stepper-button[aria-disabled="true"],
+html[data-theme="dark"] .number-stepper button.stepper-button:disabled,
+html[data-theme="dark"] .number-stepper button.stepper-button[aria-disabled="true"] {
+  background: transparent;
+  color: var(--secondary);
+  opacity: .4;
+  cursor: default;
+}
+.number-stepper:has(input:disabled) { background: var(--field-disabled); }
+.number-stepper:has(input:disabled) input { color: var(--secondary); }
+
+.search { position: relative; }
+.search::before {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  top: calc(50% - 7px);
+  left: 15px;
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid var(--field-placeholder);
+  border-radius: 50%;
+  pointer-events: none;
+}
+.search::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  top: calc(50% + 3px);
+  left: 25px;
+  width: 6px;
+  height: 1.5px;
+  border-radius: 1px;
+  background: var(--field-placeholder);
+  transform: rotate(45deg);
+  transform-origin: left center;
+  pointer-events: none;
+}
+.search input,
+html[data-theme="dark"] .search input { padding-left: 39px; }
+
+@media (hover: hover) and (pointer: fine) {
+  .number-stepper button.stepper-button:hover:not(:disabled):not([aria-disabled="true"]),
+  html[data-theme="dark"] .number-stepper button.stepper-button:hover:not(:disabled):not([aria-disabled="true"]) {
+    background: var(--stepper-hover);
+    color: var(--text);
+  }
+}
+
+@media (max-width: 720px) {
+  input:is(:not([type]), [type="text"], [type="search"], [type="number"], [type="email"], [type="url"], [type="password"]),
+  textarea, .select-field select, .difficulty-controls select, .difficulty-evaluation select,
+#evaluation select,
+  .library-course select, dialog select, .search input,
+  html[data-theme="dark"] input:is(:not([type]), [type="text"], [type="search"], [type="number"], [type="email"], [type="url"], [type="password"]),
+  html[data-theme="dark"] textarea, html[data-theme="dark"] .select-field select,
+  html[data-theme="dark"] .difficulty-controls select, html[data-theme="dark"] .difficulty-evaluation select,
+  html[data-theme="dark"] .library-course select, html[data-theme="dark"] dialog select,
+  html[data-theme="dark"] .search input {
+    font-size: 1rem;
+  }
+  .edit-panel textarea { font-size: 1rem; }
+  .writing-field textarea,
+  html[data-theme="dark"] .writing-field textarea {
+    padding: 16px 17px;
+    border-radius: 16px;
+    font-size: 1rem;
+  }
+  .compose-options { gap: 16px 12px; }
+  .compose-options .select-field { flex-basis: 100%; }
+  .compose-options .number-field {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-basis: 100%;
+    gap: 16px;
+  }
+  .compose-options .number-field .number-stepper { margin-top: 0; }
+  .difficulty-counts { grid-template-columns: 1fr; gap: 8px; margin: 16px 0; }
+  .difficulty-counts .number-field {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin: 0;
+    font-size: .8rem;
+  }
+  .difficulty-counts .number-field > label { font-size: .8rem; }
+  .difficulty-counts .number-stepper { flex: 0 0 146px; margin-top: 0; }
+  .number-stepper input[type="number"],
+  html[data-theme="dark"] .number-stepper input[type="number"] { font-size: 1rem; }
+  .difficulty-controls .select-field { max-width: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  input, textarea, select, .number-stepper, .number-stepper button.stepper-button { transition: none; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  :root { --field-fill: #f0f4ee; --field-focus-fill: #fcfefa; }
+  html[data-theme="dark"] { --field-fill: #2c3930; --field-focus-fill: #34443a; }
+}
+@media (prefers-contrast: more) {
+  :root {
+    --field-fill: #fff;
+    --field-focus-fill: #fff;
+    --field-border: #6f8376;
+    --field-focus-border: #315c42;
+    --field-placeholder: #566b5e;
+  }
+  html[data-theme="dark"] {
+    --field-fill: #202b24;
+    --field-focus-fill: #202b24;
+    --field-border: #a5bcae;
+    --field-focus-border: #c8e3d0;
+    --field-placeholder: #b1c8b8;
+  }
+  .number-stepper button.stepper-button[aria-disabled="true"],
+  html[data-theme="dark"] .number-stepper button.stepper-button[aria-disabled="true"] { opacity: .65; }
+}

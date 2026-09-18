@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+.venv*/
+__pycache__/
+.pytest_cache/
+*.pyc
+.rag-models/
+data/
+models/
+tmp/
+*.sqlite*
+*.db*
+*.pem
+*.key
+.DS_Store
+backups/

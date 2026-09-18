@@ -1,0 +1,18 @@
+/* Course scope and live jobs share the existing quiet collection layout. */
+.library-tools { flex-wrap: wrap; gap: 14px; }
+.library-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; flex: 1; justify-content: flex-end; min-width: 0; }
+.library-course { min-width: 140px; max-width: 230px; flex: 1; }
+.library-course select { margin: 0; width: 100%; text-overflow: ellipsis; font-weight: 400; }
+.library-filters .search { flex: 1 1 180px; max-width: 270px; }
+.generation-row { border-style: dashed; box-shadow: none; background: transparent; }
+.generation-row .file-icon { background: transparent; }
+.job-error { max-width: 70ch; overflow-wrap: anywhere; }
+.live-update-error { font-size: .8rem; color: var(--secondary); margin-bottom: 16px; }
+.live-update-error[hidden] { display: none; }
+.row-main h3, .row-main p { overflow-wrap: anywhere; }
+@media(max-width:720px) {
+  .library-filters { width: 100%; gap: 10px; }
+  .library-course { flex-basis: 100%; max-width: none; }
+  .library-filters .search { max-width: none; flex-basis: 100%; }
+  .generation-row .row-actions { width: 100%; justify-content: flex-end; }
+}

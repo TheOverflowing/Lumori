@@ -1,0 +1,99 @@
+[
+  {
+    "repo": "opendatalab/MinerU-4_models_onnx",
+    "revision": "358310b4f64b95f9fefc372ad899356e4111f376",
+    "directory": "mineru/models/MinerU-4_models_onnx",
+    "files": [
+      {
+        "path": "Layout/PP-DocLayoutV2/inference.onnx",
+        "sha256": "cd540dc296ff3115fe78efa65b68501e6a8dc74b198acc9834a725ffaa095aac"
+      },
+      {
+        "path": "Layout/PP-DocLayoutV2/inference.yml",
+        "sha256": "93100e0fb2cd76b9d246a853deea85e191d8333b2cfca7be76e82e4c4ebfa819"
+      },
+      {
+        "path": "MFR/pp_formulanet_plus_m/PP-FormulaNet_plus-M.onnx",
+        "sha256": "20a32595c2b30282dcd069e6295e9fad96115697beb66acb9b681b814006d193"
+      },
+      {
+        "path": "MFR/pp_formulanet_plus_m/PP-FormulaNet_plus-M_inference.yml",
+        "sha256": "87b5f3d7f2b2fe553627d77b37f496608ca150ebd0ef62d362591edca47b5538"
+      },
+      {
+        "path": "OCR/paddleocr/ch_PP-OCRv6_small_rec_infer.onnx",
+        "sha256": "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634"
+      },
+      {
+        "path": "OCR/paddleocr/ch_PP-OCRv6_small_rec_inference.yml",
+        "sha256": "c0541b06832948d7d3052e9ac6b572c6063d79ecd800493f4ec14d1b901c16d7"
+      },
+      {
+        "path": "OCR/paddleocr/ch_PP-OCRv6_tiny_det_infer.onnx",
+        "sha256": "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8"
+      },
+      {
+        "path": "OCR/paddleocr/ch_PP-OCRv6_tiny_det_inference.yml",
+        "sha256": "a1fa68ab31e29252936328e728633180908f997023d9eacb81f175e326676554"
+      },
+      {
+        "path": "OCR/paddleocr/seal_PP-OCRv4_det_infer.onnx",
+        "sha256": "3e190df84542c2756975febe8f73603b587a23c7f7badfdd3fc8a986540d5bc0"
+      },
+      {
+        "path": "OCR/paddleocr/seal_PP-OCRv4_det_inference.yml",
+        "sha256": "e5b8dd5a727602bdd526d9db152cc767bc761198c453460df7c8f7ae59d2ea3c"
+      },
+      {
+        "path": "Table/PP-LCNet_x1_0_table_cls.onnx",
+        "sha256": "c84bf1d79c1c74d534b5b12adb14dd12151c42f7ae3e4be4f1042b830f80b949"
+      },
+      {
+        "path": "Table/slanet-plus.onnx",
+        "sha256": "d57a942af6a2f57d6a4a0372573c696a2379bf5857c45e2ac69993f3b334514b"
+      },
+      {
+        "path": "Table/unet.onnx",
+        "sha256": "0ea48d3a17e35ef5c2e498a5e799566073234d39b1079ca21d9f4fafe73c6d20"
+      }
+    ]
+  },
+  {
+    "repo": "jinzhenj/MinerU2.5-Pro-2605-1.2B-GGUF",
+    "revision": "9185688a0495e1577d521a757c7c0b62dd38ca48",
+    "directory": "mineru/models/MinerU2.5-Pro-2605-1.2B-GGUF",
+    "files": [
+      {
+        "path": "MinerU2.5-Pro-2605-1.2B-Q8_0.gguf",
+        "sha256": "3f3523429c880d675c0330cb3de78240452bc40a961d037e24f91ab8488f03e7"
+      },
+      {
+        "path": "mmproj-MinerU2.5-Pro-2605-1.2B-Q8_0.gguf",
+        "sha256": "b6c08ab50352677f7396af45ee60682f353f55488e26911d8154bfc37514d3f8"
+      }
+    ]
+  },
+  {
+    "repo": "docling-project/docling-layout-heron",
+    "revision": "8f39ad3c0b4c58e9c2d2c84a38465abf757272d8",
+    "directory": "docling/docling-project--docling-layout-heron",
+    "files": [
+      {
+        "path": "model.safetensors",
+        "sha256": "00333a43451945aaf89db8ca9c0a17e75d1537c17db60fdb91aa95f4c7929e0c"
+      },
+      {
+        "path": "config.json",
+        "sha256": "fdea30805ce2f5666b147fca941dcdd27ad468e27d6ed21902207d3da056a97d"
+      },
+      {
+        "path": "README.md",
+        "sha256": "175700839bc7808eac6af1d0c23e4f483606ab2276fe01122f4093e61a1a65b6"
+      },
+      {
+        "path": "preprocessor_config.json",
+        "sha256": "cd38cd59999e7a95d68e487fbe5132df3d4e5c32a0836add57e6126ba0c4eaf1"
+      }
+    ]
+  }
+]

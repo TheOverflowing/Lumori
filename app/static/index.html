@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#eff1ee">
+  <script src="/static/preferences.js"></script>
+  <title>知序 — 教学创作空间</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/material.css">
+  <link rel="stylesheet" href="/static/preferences.css">
+  <link rel="stylesheet" href="/static/multimodal.css">
+  <link rel="stylesheet" href="/static/library.css">
+  <link rel="stylesheet" href="/static/inputs.css">
+  <link rel="stylesheet" href="/static/auth.css">
+  <link rel="stylesheet" href="/static/parsing.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main" hidden><span data-i18n="跳转到内容">跳转到内容</span></a>
+  <section id="auth-gate" class="auth-gate" aria-labelledby="auth-title">
+    <header class="auth-header"><a class="identity" href="/" data-i18n-aria-label="知序" aria-label="知序"><img src="/static/icons/book-open.svg" alt=""><span data-i18n="知序">知序</span></a><div class="appearance-controls" role="group" data-i18n-aria-label="外观与语言" aria-label="外观与语言"><button data-theme-toggle class="plain icon-button" type="button" aria-label="切换到深色模式"><img src="/static/icons/moon.svg" alt=""></button><button data-language-toggle class="plain" type="button" aria-label="Switch to English" lang="en">EN</button></div></header>
+    <div class="auth-card"><div id="auth-content"><h1 id="auth-title" data-i18n="正在载入…">正在载入…</h1><p class="auth-loading" role="status" data-i18n="正在检查登录状态…">正在检查登录状态…</p></div></div>
+    <noscript><p class="auth-noscript">请启用 JavaScript 后使用知序。 Enable JavaScript to use Learning Studio.</p></noscript>
+  </section>
+  <div class="app-shell" hidden>
+    <aside class="sidebar" data-i18n-aria-label="工作空间" aria-label="工作空间">
+      <a class="identity" href="#home"><img src="/static/icons/book-open.svg" alt=""><span><span data-i18n="知序">知序</span></span></a>
+      <div class="course-switcher"><label class="sr-only" for="course-select"><span data-i18n="当前课程">当前课程</span></label><select id="course-select"><option value="" data-i18n="正在载入…">正在载入…</option></select><button class="plain icon-button" data-action="new-course" data-i18n-aria-label="新建课程" aria-label="新建课程" data-i18n-title="新建课程" title="新建课程"><img src="/static/icons/plus.svg" alt=""></button></div>
+      
+      <nav id="navigation" data-i18n-aria-label="主导航" aria-label="主导航">
+        <a href="#home" data-page="home" data-i18n-data-short-label="概览" data-short-label="概览" data-i18n-aria-label="课程概览" aria-label="课程概览"><img src="/static/icons/panels-top-left.svg" alt=""><span data-i18n="课程概览">课程概览</span></a>
+        <a href="#documents" data-page="documents" data-i18n-data-short-label="资料" data-short-label="资料" data-i18n-aria-label="课程资料" aria-label="课程资料"><img src="/static/icons/files.svg" alt=""><span data-i18n="课程资料">课程资料</span></a>
+        <a href="#generate" data-page="generate" data-i18n-data-short-label="创作" data-short-label="创作" data-i18n-aria-label="创作学习材料" aria-label="创作学习材料"><img src="/static/icons/wand-sparkles.svg" alt=""><span data-i18n="创作学习材料">创作学习材料</span></a>
+        <a href="#contents" data-page="contents" data-i18n-data-short-label="内容" data-short-label="内容" data-i18n-aria-label="内容与审核" aria-label="内容与审核"><img src="/static/icons/book-open.svg" alt=""><span data-i18n="内容与审核">内容与审核</span></a>
+        <a href="#jobs" data-page="jobs" data-i18n-data-short-label="任务" data-short-label="任务" data-i18n-aria-label="任务记录" aria-label="任务记录"><img src="/static/icons/clock-3.svg" alt=""><span data-i18n="任务记录">任务记录</span></a>
+      </nav>
+      <div class="sidebar-bottom"><button class="settings" data-action="settings" data-i18n-aria-label="模型连接" aria-label="模型连接" data-i18n-title="模型连接" title="模型连接"><img src="/static/icons/settings-2.svg" alt=""><span data-i18n="模型连接">模型连接</span></button></div>
+    </aside>
+    <div class="app-main">
+      <header class="toolbar"><div class="breadcrumb"><span id="route-label"><span data-i18n="课程概览">课程概览</span></span></div><div class="toolbar-right"><div id="toolbar-actions"></div><button id="account-button" class="plain account-button" data-action="account" data-i18n-aria-label="账号" aria-label="账号"><span id="account-initial" aria-hidden="true"></span><span id="account-name"></span></button><div class="appearance-controls" role="group" data-i18n-aria-label="外观与语言" aria-label="外观与语言"><button id="theme-toggle" data-theme-toggle class="plain icon-button" type="button" aria-label="切换到深色模式" title="切换到深色模式"><img src="/static/icons/moon.svg" alt=""></button><button id="language-toggle" data-language-toggle class="plain" type="button" aria-label="Switch to English" title="Switch to English" lang="en">EN</button></div></div></header>
+      <main id="main" tabindex="-1"><div id="page" aria-live="off"></div></main>
+    </div>
+  </div>
+  <div id="notice" class="notice" hidden><span id="notice-text" role="status" aria-live="polite"></span><button class="notice-close" data-i18n-aria-label="关闭提示" aria-label="关闭提示"><span data-i18n="关闭">关闭</span></button></div>
+  <dialog id="modal" aria-labelledby="modal-title"><div id="modal-content"></div></dialog>
+</body>
+</html>

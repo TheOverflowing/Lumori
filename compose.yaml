@@ -1,0 +1,40 @@
+name: lumori
+x-image: &image
+  image: lumori:${LUMORI_BUILD_TARGET:-full}
+  build:
+    context: .
+    target: ${LUMORI_BUILD_TARGET:-full}
+services:
+  init:
+    <<: *image
+    command: ["python", "scripts/prepare_deployment.py", "--mode", "${LUMORI_BUILD_TARGET:-full}"]
+    volumes:
+      - models:/srv/lumori/models
+    restart: "no"
+    healthcheck:
+      disable: true
+  app:
+    <<: *image
+    env_file: .env
+    environment:
+      DATA_DIR: /srv/lumori/data
+      RAG_TOKENIZER_PATH: /srv/lumori/models/tokenizer/tokenizer.json
+      MINERU_PYTHON: /opt/mineru/bin/python
+      MINERU_RUNTIME: /srv/lumori/models/mineru
+      DOCLING_PYTHON: /opt/docling/bin/python
+      DOCLING_MODELS: /srv/lumori/models/docling
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8765}:8765"
+    volumes:
+      - data:/srv/lumori/data
+      - models:/srv/lumori/models
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+volumes:
+  data:
+  models:

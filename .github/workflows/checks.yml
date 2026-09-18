@@ -1,0 +1,37 @@
+name: Application and deployment checks
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: pip install -r requirements.lock.txt -r requirements-dev.txt
+      - run: python scripts/prepare_rag_tokenizer.py
+      - run: python -m pytest -q
+      - run: node --test tests/frontend_*.test.mjs
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --target full -t lumori:check .
+      - name: Check parser imports
+        run: |
+          docker run --rm lumori:check /opt/mineru/bin/python -c 'import mineru, mineru_llama_cpp, onnxruntime'
+          docker run --rm lumori:check /opt/docling/bin/python -c 'from docling.document_converter import DocumentConverter'
+      - name: Boot isolated service and check persistence
+        run: python3 scripts/smoke_container.py --image lumori:check
