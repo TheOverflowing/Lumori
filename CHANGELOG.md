@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.0-ca1 — 2026-09-20
+
+- Sync the CA1 application from research tag `ca1-2026-09-20`: per-question generation/review, continuation, difficulty acceptance, query fusion/clarification, bounded source exploration, document lifecycle, ratings and Word/PDF exports.
+- Preserve deployment host restrictions, `/healthz`, model preparation, Docker/Compose and data persistence.
+- Include product regression tests and font licenses; keep research runs, papers and thesis deliverables in `lumori-fyp`.
+- Update provider-budget and quality-retry fixtures to match current behavior. Optional Harness runtime remains separately installed.
+
+
 ## v0.1.0 — 2026-09-18
 
 Initial standalone deployment repository, extracted from research checkpoint `TheOverflowing/lumori-fyp@3e61644a251e9e88e450463ebd57ea0d28c41238`.

@@ -1,5 +1,7 @@
 # Lumori
 
+当前版本：**v0.2.0-ca1（2026-09-20）**。对应研究快照为 `lumori-fyp` 的 `ca1-2026-09-20` 标签。参阅 [CA1 变更](CHANGELOG.md)、[使用指南](docs/USER_GUIDE.md)和[内容导出](docs/CONTENT_EXPORTS.md)。
+
 用于教育内容与测评生成的 Web 应用。此仓库仅维护可部署的产品代码、运行配置和回归测试；实验报告、原始语料及论文材料保存在独立的私有研究仓库 `TheOverflowing/lumori-fyp`。
 
 功能包括账号注册/登录和账号间数据隔离、课程与资料管理、可控难度出题、中英文界面、RAG 检索与引用、MinerU Standard/Advanced 文档解析，以及可选的 Docling 图片提取和视觉模型语义描述。
@@ -92,3 +94,7 @@ node --test tests/frontend_*.test.mjs
 ## 仓库边界
 
 不提交 `.env`、API 密钥、账号数据库、上传材料、生成内容、模型权重、虚拟环境或实验报告。`deploy/models.json` 只保存部署必需的模型版本与校验值，不包含实验数据。第三方代码与模型遵守各自许可证，见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+
+## CA1 运行边界
+
+默认使用 native Agent；可选 DeepSeek Harness 需另行安装并配置，不包含在标准 Docker 镜像内。新增功能包括逐题复核与续做、查询澄清、资料探索、版本评分及 Word/PDF 导出。自动测试是离线接口与规则验证，不代表人工认可或学习效果。当前版本的验证范围见 [CA1 validation](docs/CA1_VALIDATION_20260920.md)。

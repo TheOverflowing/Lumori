@@ -7,7 +7,7 @@ import io
 import json
 import sqlite3
 import shutil
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -21,10 +21,16 @@ from .providers import ApiProviders
 from .pipeline import Pipeline, parse_document, validate_asset, document_chunk_ids
 from .models import CourseCreate, GenerateRequest, ReviewRequest, MediaRequest, MediaReview, EvaluationRequest, LearningAsset
 from .auth import AuthService, AuthError
-from . import document_storage, document_jobs, document_backends
+from . import document_storage, document_jobs, document_backends, document_lifecycle
 from .document_parsing import parser_capabilities
+from . import generation_preparation
+from .content_evaluations import current_evaluation, save_evaluation, CURRENT_EXPORT_SQL
 
 STATIC=Path(__file__).parent/'static'
+
+class DocumentEnabled(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    enabled: bool = Field(strict=True)
 
 class ParseOptions(BaseModel):
     model_config=ConfigDict(extra='forbid')
@@ -61,7 +67,7 @@ def create_app(settings=None,providers_factory=ApiProviders):
         await pipeline.start()
         yield
         await pipeline.stop()
-    app=FastAPI(title='Lumori',version='0.1.0',lifespan=lifespan)
+    app=FastAPI(title='Lumori',version='0.2.0-ca1',lifespan=lifespan)
     app.state.store=store;app.state.pipeline=pipeline;app.state.settings=settings;app.state.auth=auth
     app.add_middleware(TrustedHostMiddleware,allowed_hosts=settings.allowed_hosts)
     @app.get('/healthz',include_in_schema=False)
@@ -101,6 +107,9 @@ def create_app(settings=None,providers_factory=ApiProviders):
     async def validation_error(request,exc):
         # Never echo submitted passwords or request bodies in error responses.
         return JSONResponse({'detail':[{'loc':e['loc'],'msg':e['msg'],'type':e['type']} for e in exc.errors()]},422)
+    @app.exception_handler(generation_preparation.PreparationError)
+    async def preparation_error(request,exc):
+        return JSONResponse({'detail':exc.message,'code':exc.code},exc.status)
     app.mount('/static',StaticFiles(directory=STATIC),name='static')
 
     def account_id(request):return request.state.auth_session.user['id']
@@ -127,10 +136,18 @@ def create_app(settings=None,providers_factory=ApiProviders):
         attempts=json.loads(saved['evidence']).get('attempts',[]) if saved else []
         for attempt in reversed(attempts):
             assessment=attempt.get('assessment')
-            if attempt.get('status')=='valid' and isinstance(assessment,dict):
+            if attempt.get('status') in ('valid','accepted_adjusted') and isinstance(assessment,dict):
                 response=assessment.get('response',assessment)
                 result.update(version=1,items=response.get('items',[]))
                 break
+        acceptance=config.get('difficulty_acceptance')
+        if isinstance(acceptance,dict) and row['version']==1:
+            result['acceptance']=acceptance
+            if acceptance.get('status') in ('strict','adjusted') and acceptance.get('items'):
+                reviewed={item['slot_id']:item for item in result['items']}
+                result.update(status='model_adjusted' if acceptance['status']=='adjusted' else 'model_checked',version=1,
+                              items=[reviewed.get(item['slot_id'],{})|item for item in acceptance['items']])
+                return result
         result['status']='model_checked' if row['version']==1 and result['items'] else 'needs_review'
         return result
     def require(*capabilities):
@@ -181,6 +198,7 @@ def create_app(settings=None,providers_factory=ApiProviders):
         return claim_legacy_workspace(store,request.state.auth_session.user,payload.token)
     @app.get('/api/status')
     async def status(request:Request):
+        from .exploration_policy import capabilities as exploration_capabilities
         try:retrieval=pipeline.retrieval_configuration()
         except ValueError as exc:raise HTTPException(503,'检索配置无效：'+str(exc)) from None
         try:chunking=pipeline.chunking_configuration()
@@ -189,6 +207,7 @@ def create_app(settings=None,providers_factory=ApiProviders):
         used=store.one('''SELECT count(*) AS n FROM calls c JOIN job_owners o ON o.job_id=c.job_id
             WHERE o.user_id=? AND substr(c.created_at,1,10)=?''',(account_id(request),now()[:10]))['n']
         return {'version':'0.1.0','capabilities':caps,'calls_today':used,'daily_call_limit':settings.max_daily_calls,'mode':'local-development',
+                'auto_exploration':exploration_capabilities(settings),
                 'document_parser':parser_capabilities()|document_backends.capabilities(settings)|{'ocr_engine':settings.document_ocr_engine},
                 'retrieval':retrieval,'chunking':chunking}
     @app.get('/api/courses')
@@ -202,9 +221,11 @@ def create_app(settings=None,providers_factory=ApiProviders):
             db.execute('INSERT INTO course_owners(course_id,user_id) VALUES(?,?)',(row['id'],account_id(request)))
         return row
     @app.get('/api/documents')
-    async def documents(course_id:str,request:Request):
+    async def documents(course_id:str,request:Request,include_deleted:bool=False):
         need_course(course_id,request)
         rows=store.all('SELECT d.*,count(c.id) AS chunks FROM documents d LEFT JOIN chunks c ON c.document_id=d.id WHERE course_id=? GROUP BY d.id ORDER BY d.created_at DESC',(course_id,))
+        for row in rows:row.update(document_lifecycle.state(store,row['id']))
+        if not include_deleted:rows=[row for row in rows if not row['deleted_at']]
         for row in rows:
             incompatible=store.one('SELECT count(*) AS n FROM chunks WHERE document_id=? AND (embedding_signature IS NULL OR embedding_signature!=?)',(row['id'],pipeline.embedding_signature()))['n']
             row['index_current']=not incompatible and row['status']=='ready'
@@ -212,9 +233,27 @@ def create_app(settings=None,providers_factory=ApiProviders):
             row['chunking_current']=row['chunking']==pipeline.chunking_configuration()
             row['parsing']=document_storage.summary(document_storage.report_for(store,row['id']))
             row['parser_options']=document_jobs.options_for(store,row['id'])
+            from .exploration_policy import document_source
+            row['external_source']=document_source(store,row['id'])
             row['figures']=document_jobs.public_figures(store,row['id'])
             row['active_jobs']=store.all("SELECT id,kind,status FROM jobs WHERE kind IN ('parse','figures') AND json_extract(payload,'$.document_id')=? AND status IN ('queued','running')",(row['id'],))
         return rows
+    @app.patch('/api/documents/{did}')
+    async def document_enabled(did:str,payload:DocumentEnabled,request:Request):
+        need_document(did,request)
+        if document_lifecycle.state(store,did)['deleted_at']:raise HTTPException(409,'请先从最近删除中恢复资料。')
+        document_lifecycle.set_enabled(store,did,payload.enabled)
+        return {'id':did}|document_lifecycle.state(store,did)
+    @app.delete('/api/documents/{did}')
+    async def delete_document(did:str,request:Request):
+        need_document(did,request)
+        document_lifecycle.trash(store,did)
+        return {'id':did}|document_lifecycle.state(store,did)
+    @app.post('/api/documents/{did}/restore')
+    async def restore_document(did:str,request:Request):
+        need_document(did,request)
+        document_lifecycle.restore(store,did)
+        return {'id':did}|document_lifecycle.state(store,did)
     @app.post('/api/documents',status_code=201)
     async def upload(request:Request,course_id:str=Form(...),file:UploadFile=File(...),tier:str|None=Form(None),images:bool=Form(False)):
         need_course(course_id,request)
@@ -227,7 +266,7 @@ def create_app(settings=None,providers_factory=ApiProviders):
             source=settings.data_dir/'documents'/(previous['id']+Path(previous['name']).suffix.lower())
             restored=not source.is_file() or hashlib.sha256(source.read_bytes()).hexdigest()!=digest
             if restored:await asyncio.to_thread(save_source,source,raw)
-            return previous|{'duplicate':True,'source_restored':restored}
+            return previous|{'duplicate':True,'source_restored':restored}|document_lifecycle.state(store,previous['id'])
         if tier is not None and tier not in ('standard','advanced'):raise HTTPException(422,'解析档位无效。')
         if Path(name).suffix.lower() not in ('.txt','.md') and (settings.document_backend=='mineru' or tier is not None):
             try:pages=document_backends.validate_source(settings,name,raw)
@@ -298,7 +337,13 @@ def create_app(settings=None,providers_factory=ApiProviders):
     @app.post('/api/documents/{did}/parse')
     async def reparse_document(did:str,request:Request,options:ParseOptions|None=None):
         doc=need_document(did,request)
-        if Path(doc['name']).suffix.lower() not in ('.txt','.md') and (settings.document_backend=='mineru' or options is not None):
+        if document_lifecycle.state(store,did)['deleted_at']:raise HTTPException(409,'请先从最近删除中恢复资料。')
+        from .exploration_policy import document_source
+        external_source=document_source(store,did)
+        web_source=external_source if Path(doc['name']).suffix.lower()=='.html' else None
+        if web_source and options and options.images:
+            raise HTTPException(400,'自动发现的网页当前支持正文解析；图片请作为单独资料导入。')
+        if not web_source and Path(doc['name']).suffix.lower() not in ('.txt','.md') and (settings.document_backend=='mineru' or options is not None):
             chosen=options.model_dump() if options else document_jobs.options_for(store,did)
             if chosen['images']:require('vision','embedding')
             active=store.one("SELECT id FROM jobs WHERE kind IN ('parse','figures') AND json_extract(payload,'$.document_id')=? AND status IN ('queued','running')",(did,))
@@ -311,10 +356,17 @@ def create_app(settings=None,providers_factory=ApiProviders):
             if hashlib.sha256(raw).hexdigest()!=doc['sha256']:raise HTTPException(400,'原始资料校验失败，请重新导入。')
             try:
                 configuration=pipeline.chunking_configuration()
-                parsed=await asyncio.to_thread(document_storage.parse_upload,settings,doc['name'],raw)
-                chunks=document_chunk_ids(document_storage.parsed_chunks(parsed.report(),configuration,doc['sha256'],settings.max_chunks),did)
+                if web_source:
+                    from .auto_exploration import parse_web_html
+                    parsed=await asyncio.to_thread(parse_web_html,raw,web_source.get('url',''))
+                    parsed.name=doc['name']
+                else:
+                    parsed=await asyncio.to_thread(document_storage.parse_upload,settings,doc['name'],raw)
+                parsed_report=parsed.report()
+                if external_source:parsed_report['external_source']=external_source
+                chunks=document_chunk_ids(document_storage.parsed_chunks(parsed_report,configuration,doc['sha256'],settings.max_chunks),did)
             except ValueError as exc:raise HTTPException(400,str(exc)) from None
-            report,directory=await asyncio.to_thread(document_storage.store_assets,settings,did,parsed)
+            report,directory=await asyncio.to_thread(document_storage.store_assets,settings,did,parsed,external_source=external_source)
             report['source_document_sha256']=doc['sha256']
             try:
                 with store.connect() as db:
@@ -333,6 +385,7 @@ def create_app(settings=None,providers_factory=ApiProviders):
     @app.post('/api/documents/{did}/figures/retry',status_code=202)
     async def retry_figures(did:str,request:Request,asset_id:str|None=None):
         need_document(did,request);require('vision','embedding')
+        if document_lifecycle.state(store,did)['deleted_at']:raise HTTPException(409,'请先从最近删除中恢复资料。')
         if asset_id and not any(a['id']==asset_id for a in document_jobs.active_figures(store,did)):
             raise HTTPException(404,'图片不存在。')
         active=store.one("SELECT id FROM jobs WHERE kind IN ('parse','figures') AND json_extract(payload,'$.document_id')=? AND status IN ('queued','running')",(did,))
@@ -341,6 +394,7 @@ def create_app(settings=None,providers_factory=ApiProviders):
     @app.patch('/api/documents/{did}/figures/{aid}')
     async def edit_figure(did:str,aid:str,payload:FigureEdit,request:Request):
         need_document(did,request)
+        if document_lifecycle.state(store,did)['deleted_at']:raise HTTPException(409,'请先从最近删除中恢复资料。')
         async with pipeline.index_locks.setdefault(did,asyncio.Lock()):
             if not any(a['id']==aid for a in document_jobs.active_figures(store,did)):raise HTTPException(404,'图片不存在。')
             data=dict(keywords_zh=[],keywords_en=[],visible_text='',relationships=[],uncertainties=[])
@@ -357,22 +411,46 @@ def create_app(settings=None,providers_factory=ApiProviders):
     @app.post('/api/documents/{did}/index',status_code=202)
     async def index_document(did:str,request:Request):
         need_document(did,request)
+        if document_lifecycle.state(store,did)['deleted_at']:raise HTTPException(409,'请先从最近删除中恢复资料。')
         require('embedding')
         return submit(uid(),'index',{'document_id':did},request)
-    @app.post('/api/generations',status_code=202)
-    async def generation(payload:GenerateRequest,request:Request):
+    def generation_scope(payload,request):
         need_course(payload.course_id,request)
         if payload.document_ids:
             for did in payload.document_ids:need_document(did,request)
             own={r['id'] for r in store.all('SELECT id FROM documents WHERE course_id=?',(payload.course_id,))}
             if not set(payload.document_ids)<=own:raise HTTPException(400,'所选资料不属于该课程')
+
+    @app.post('/api/generations/prepare')
+    async def prepare_generation(payload:GenerateRequest,request:Request):
+        generation_scope(payload,request)
+        require('text')
+        return await generation_preparation.prepare(store,providers,payload,account_id(request))
+
+    @app.post('/api/generations',status_code=202)
+    async def generation(payload:GenerateRequest,request:Request):
+        generation_scope(payload,request)
         require('text','embedding')
-        return submit(payload.request_key,'generate',payload.model_dump(),request)
+        if payload.auto_explore:
+            from .exploration_policy import require_available
+            try:require_available(settings)
+            except ValueError as exc:raise HTTPException(503,str(exc)) from None
+        generation_preparation.validate_submission(store,payload,account_id(request))
+        try:
+            job,new=store.job(payload.request_key,'generate',payload.model_dump(),owner_id=account_id(request),
+                              preparation_id=payload.preparation_id)
+        except Conflict as exc:
+            if payload.preparation_id:
+                raise generation_preparation.PreparationError('preparation_used',str(exc)) from None
+            raise HTTPException(409,str(exc)) from None
+        if new:pipeline.enqueue(job['id'])
+        return {'job_id':job['id'],'status':job['status'],'reused':not new}
     # Expose only navigation metadata; job payloads can include private prompts.
     job_context_sql='''
         SELECT j.id,j.kind,j.status,j.result,j.error,j.created_at,j.updated_at,o.user_id AS owner_id,
             CASE j.kind
                 WHEN 'generate' THEN json_extract(j.payload,'$.course_id')
+                WHEN 'prepare' THEN json_extract(j.payload,'$.course_id')
                 WHEN 'index' THEN d.course_id
                 WHEN 'parse' THEN d.course_id
                 WHEN 'figures' THEN d.course_id
@@ -390,7 +468,7 @@ def create_app(settings=None,providers_factory=ApiProviders):
     @app.get('/api/jobs')
     async def jobs(request:Request,course_id:str|None=None):
         if course_id is not None:need_course(course_id,request)
-        where=' WHERE owner_id=?'+(' AND course_id=?' if course_id is not None else '')
+        where=" WHERE owner_id=? AND kind!='prepare'"+(' AND course_id=?' if course_id is not None else '')
         return store.all('SELECT id,kind,status,error,created_at,course_id,content_id FROM ('+
             job_context_sql+')'+where+' ORDER BY created_at DESC LIMIT 30',
             (account_id(request),course_id) if course_id is not None else (account_id(request),))
@@ -399,13 +477,62 @@ def create_app(settings=None,providers_factory=ApiProviders):
         row=store.one('SELECT * FROM ('+job_context_sql+') WHERE id=? AND owner_id=?',(jid,account_id(request)))
         if not row:raise HTTPException(404,'任务不存在')
         row.pop('owner_id',None)
-        row['result']=json.loads(row['result']) if row['result'] else None;return row
+        row['result']=json.loads(row['result']) if row['result'] else None
+        from .job_progress import snapshot
+        row['timeline']=snapshot(store,row)
+        from .generation_agent import progress
+        evidence=store.one('SELECT evidence FROM job_evidence WHERE job_id=?',(jid,))
+        try:
+            agent_progress=progress(json.loads(evidence['evidence'])) if evidence else None
+        except (ValueError,TypeError,KeyError,AttributeError):
+            agent_progress=None  # Historical malformed audit rows cannot break task status.
+        if agent_progress:
+            row['progress']=agent_progress
+            row['progress']['calls']=store.one('SELECT count(*) AS n FROM calls WHERE job_id=?',(jid,))['n']
+            exploration=store.one('SELECT state FROM exploration_runs WHERE job_id=?',(jid,))
+            if exploration:
+                try:exploration_state=json.loads(exploration['state'])
+                except (ValueError,TypeError):exploration_state=None
+                if not isinstance(exploration_state,dict) or exploration_state.get('status')!='complete':
+                    row['progress']['resumable']=False
+        return row
+    @app.post('/api/jobs/{jid}/resume')
+    async def resume_job(jid:str,request:Request):
+        row=await job(jid,request)  # Same ownership boundary as job evidence/content.
+        if row['kind']!='generate':raise HTTPException(400,'此任务不支持继续生成')
+        if settings.generation_workflow!='agent_v1':raise HTTPException(409,'当前未启用此任务的 Agent 工作流，请恢复配置后继续。')
+        from .generation_agent import authorize_resume
+        try:authorize_resume(store,jid)
+        except ValueError as exc:raise HTTPException(409,str(exc)) from None
+        pipeline.enqueue(jid)
+        return {'job_id':jid,'resumed':True}
+    @app.get('/api/jobs/{jid}/generation-request')
+    async def saved_generation_request(jid:str,request:Request):
+        current=await job(jid,request)
+        if current['kind']!='generate':raise HTTPException(400,'此任务没有可恢复的生成条件。')
+        original=store.one('SELECT payload FROM jobs WHERE id=?',(jid,))
+        raw=json.loads(original['payload'])
+        payload=GenerateRequest.model_validate(raw)
+        # This rebuilds the immutable clarification context without calling a
+        # provider or reusing a consumed preparation token in the next request.
+        resolved=generation_preparation.execution_request(store,payload,jid).model_dump()
+        # Older requests always included introductory material. Recover their
+        # original intent without changing a bound clarification fingerprint.
+        saved=store.one('SELECT evidence FROM job_evidence WHERE job_id=?',(jid,))
+        configuration=json.loads(saved['evidence']).get('configuration',{}) if saved else {}
+        resolved['include_explanations']=raw.get('include_explanations',configuration.get('include_explanations',True))
+        fields=('course_id','topic','material','difficulty','difficulty_distribution',
+                'learner_profile','question_type','count','language','document_ids',
+                'query_fusion','auto_explore','include_explanations')
+        return {'request':{key:resolved[key] for key in fields if key in resolved}}
     @app.get('/api/jobs/{jid}/evidence')
     async def job_evidence(jid:str,request:Request):
         row=await job(jid,request)
         evidence=store.one('SELECT evidence,updated_at FROM job_evidence WHERE job_id=?',(jid,))
+        exploration=store.one('SELECT state FROM exploration_runs WHERE job_id=?',(jid,))
         return {'schema_version':'ca1-job-evidence-v1','exported_at':now(),'job':row,
                 'evidence':json.loads(evidence['evidence']) if evidence else None,
+                'exploration':json.loads(exploration['state']) if exploration else None,
                 'calls':store.calls_for_job(jid),
                 'limitations':['Retrieved passages and citation identifiers do not establish factual correctness.',
                                'Call success describes the provider response contract; inspect job and attempt validation separately.']}
@@ -425,6 +552,7 @@ def create_app(settings=None,providers_factory=ApiProviders):
         row['media']=store.all('SELECT id,version,kind,mime,status,metadata FROM media WHERE content_id=? AND version=?',(cid,row['version']))
         for item in row['media']:item['metadata']=json.loads(item['metadata'])
         row['difficulty_assessment']=difficulty_assessment_for(row)
+        row['evaluation']=current_evaluation(store,cid,row['version'])
         return row
     @app.post('/api/contents/{cid}/review')
     async def review(cid:str,payload:ReviewRequest,request:Request):
@@ -434,7 +562,7 @@ def create_app(settings=None,providers_factory=ApiProviders):
         if payload.action=='approve' and payload.asset is not None:raise HTTPException(400,'审核不能同时修改内容，请先保存新版本')
         asset=payload.asset or LearningAsset.model_validate_json(row['asset'])
         config=json.loads(row['config'])
-        try:validate_asset(asset,GenerateRequest(**({'request_key':'review-validation'}|{k:v for k,v in config.items() if k in GenerateRequest.model_fields})),json.loads(row['sources']),enforce_difficulty='difficulty_plan' in config)
+        try:validate_asset(asset,GenerateRequest(**({'request_key':'review-validation','include_explanations':True}|{k:v for k,v in config.items() if k in GenerateRequest.model_fields})),json.loads(row['sources']),enforce_difficulty='difficulty_plan' in config)
         except ValueError as exc:raise HTTPException(400,str(exc)) from None
         if not asset.evidence_sufficient:raise HTTPException(400,'证据不足的材料不能保存或审核')
         version=row['version']+(payload.action=='save')
@@ -450,12 +578,25 @@ def create_app(settings=None,providers_factory=ApiProviders):
         if row['version']!=payload.version or row['status']!='approved':raise HTTPException(409,'请先审核当前文本版本')
         require('speech' if payload.kind=='audio' else 'image')
         return submit(payload.request_key,'media',payload.model_dump()|{'content_id':cid},request)
-    @app.get('/api/media/{mid}/file')
-    async def media_file(mid:str,request:Request):
+    def owned_media_file(mid,request):
         row=store.one('SELECT * FROM media WHERE id=?',(mid,))
         if not row:raise HTTPException(404,'媒体不存在')
         need_content(row['content_id'],request)
-        return FileResponse(settings.data_dir/'media'/row['path'],media_type=row['mime'])
+        directory=(settings.data_dir/'media').resolve()
+        path=(directory/row['path']).resolve()
+        if not path.is_relative_to(directory) or not path.is_file():raise HTTPException(404,'媒体文件暂不可用')
+        return row,path
+    @app.get('/api/media/{mid}/file')
+    async def media_file(mid:str,request:Request):
+        row,path=owned_media_file(mid,request)
+        return FileResponse(path,media_type=row['mime'])
+    @app.get('/api/media/{mid}/download')
+    async def download_media(mid:str,request:Request):
+        row,path=owned_media_file(mid,request)
+        # Any persisted media kind can use this attachment endpoint, including
+        # future video output. No provider URL or user-supplied path is fetched.
+        return FileResponse(path,media_type=row['mime'],filename=path.name,
+                            content_disposition_type='attachment')
     @app.post('/api/media/{mid}/approve')
     async def approve_media(mid:str,payload:MediaReview,request:Request):
         row=store.one('SELECT * FROM media WHERE id=?',(mid,))
@@ -477,7 +618,7 @@ def create_app(settings=None,providers_factory=ApiProviders):
         media=store.all("SELECT id,kind FROM media WHERE content_id=? AND version=? AND status='approved'",(cid,row['version']))
         return {'id':cid,'version':row['version'],'asset':asset,'media':media}
     @app.post('/api/contents/{cid}/evaluations',status_code=201)
-    async def evaluation(cid:str,payload:EvaluationRequest,request:Request):
+    async def evaluation(cid:str,payload:EvaluationRequest,request:Request,response:Response):
         row=need_content(cid,request)
         if row['version']!=payload.version:raise HTTPException(409,'请评价当前版本')
         metrics=payload.model_dump()
@@ -489,7 +630,7 @@ def create_app(settings=None,providers_factory=ApiProviders):
                 raise HTTPException(400,'逐题难度评价须覆盖当前版本的全部题目且不能重复；不能判断时请选择“无法判断”。')
             plan={slot['slot_id']:slot['difficulty'] for slot in config.get('difficulty_plan',[])}
             checked=difficulty_assessment_for(row)
-            model_levels={item['slot_id']:item['assessed_difficulty'] for item in checked['items']} if checked['status']=='model_checked' else {}
+            model_levels={item['slot_id']:item['assessed_difficulty'] for item in checked['items']} if checked['status'] in ('model_checked','model_adjusted') else {}
             details=[]
             for slot,level in ratings.items():
                 target=plan.get(slot)
@@ -504,15 +645,16 @@ def create_app(settings=None,providers_factory=ApiProviders):
                 'uncertain':sum(r['assessed_difficulty']=='uncertain' for r in details),
                 'rate':sum(r['matches_target'] for r in compared)/len(compared) if compared else None,
                 'interpretation':'教师判断与目标难度的一致率，不是学生答对率。'}
-        eid=uid();store.execute('INSERT INTO evaluations VALUES(?,?,?,?,?)',(eid,cid,payload.version,dumps(metrics),now()))
-        return {'id':eid}
+        try:result=save_evaluation(store,cid,payload.version,metrics)
+        except Conflict as exc:raise HTTPException(409,str(exc)) from None
+        response.status_code=201 if result['created'] else 200
+        return result
     @app.get('/api/difficulty/evaluations/export')
     async def export_difficulty_evaluations(request:Request):
         out=io.StringIO();writer=csv.writer(out)
         writer.writerow(['evaluation_id','content_id','version','slot_id','target_difficulty','generated_difficulty',
                          'model_assessed_difficulty','teacher_assessed_difficulty','matches_target','created_at'])
-        for row in store.all('''SELECT e.* FROM evaluations e JOIN contents c ON c.id=e.content_id
-            JOIN course_owners o ON o.course_id=c.course_id WHERE o.user_id=? ORDER BY e.created_at''',(account_id(request),)):
+        for row in store.all(CURRENT_EXPORT_SQL,(account_id(request),)):
             for rating in json.loads(row['metrics']).get('question_difficulties',[]):
                 writer.writerow([row['id'],row['content_id'],row['version'],rating['slot_id'],rating.get('target_difficulty'),
                     rating.get('generated_difficulty'),rating.get('model_assessed_difficulty'),rating['assessed_difficulty'],
@@ -520,8 +662,7 @@ def create_app(settings=None,providers_factory=ApiProviders):
         return Response('\ufeff'+out.getvalue(),media_type='text/csv',headers={'Content-Disposition':'attachment; filename="difficulty-evaluations.csv"'})
     @app.get('/api/evaluations/export')
     async def export_evaluations(request:Request):
-        rows=store.all('''SELECT e.* FROM evaluations e JOIN contents c ON c.id=e.content_id
-            JOIN course_owners o ON o.course_id=c.course_id WHERE o.user_id=? ORDER BY e.created_at''',(account_id(request),));out=io.StringIO()
+        rows=store.all(CURRENT_EXPORT_SQL,(account_id(request),));out=io.StringIO()
         writer=csv.writer(out);writer.writerow(['content_id','version','correctness','groundedness','difficulty_match','notes','created_at'])
         for row in rows:
             m=json.loads(row['metrics']);note=m['notes']
@@ -535,18 +676,30 @@ def create_app(settings=None,providers_factory=ApiProviders):
         sources=json.loads(row['sources'])
         config.pop('request_key',None)
         calls=store.calls_for_job(row['job_id'])
+        exploration=store.one('SELECT state FROM exploration_runs WHERE job_id=?',(row['job_id'],))
         bundle={'schema_version':'ca1-evidence-v1','exported_at':now(),
             'content_id':cid,'version':row['version'],'status':row['status'],
             'asset':json.loads(row['asset']),'sources':sources,'configuration':config,
             'difficulty_assessment':difficulty_assessment_for(row),
             'generation_calls':calls,
+            'exploration':json.loads(exploration['state']) if exploration else None,
             'revisions':[dict(version=r['version'],asset=json.loads(r['asset']),created_at=r['created_at']) for r in store.all('SELECT * FROM revisions WHERE content_id=? ORDER BY version',(cid,))],
             'limitations':['Citation identifiers establish provenance, not factual correctness.',
                 'Call records describe initial generation; content may have been edited afterwards.']}
         return Response(dumps(bundle),media_type='application/json',headers={'Content-Disposition':'attachment; filename="ca1-evidence.json"'})
     @app.get('/api/contents/{cid}/export')
-    async def export_content(cid:str,request:Request):
+    async def export_content(cid:str,request:Request,format:str='md',include_answers:bool=True,
+                             language:str='en',version:int|None=None):
         row=need_content(cid,request);asset=json.loads(row['asset'])
+        if version is not None and version!=row['version']:raise HTTPException(409,'内容已更新，请刷新后重新导出。')
+        if format not in ('md','pdf','docx'):raise HTTPException(400,'不支持此文件格式。')
+        if language not in ('en','zh'):raise HTTPException(400,'不支持此导出语言。')
+        if format in ('pdf','docx'):
+            from .content_exports import export_material
+            result=await run_in_threadpool(export_material,row,format,include_answers,language)
+            return Response(result.data,media_type=result.mime_type,headers={
+                'Content-Disposition':f"attachment; filename=\"lumori.{format}\"; filename*=UTF-8''{quote(result.filename,safe='')}",
+                'X-Content-Version':str(row['version'])})
         text='# '+asset['title']+'\n\n状态：'+row['status']+'\n\n'
         for s in asset['sections']:text+='## '+s['heading']+'\n\n'+s['text']+'\n\n引用片段：'+', '.join(s['citation_ids'])+'\n\n'
         for i,q in enumerate(asset['questions'],1):
@@ -554,8 +707,15 @@ def create_app(settings=None,providers_factory=ApiProviders):
             if q.get('difficulty'):
                 text+='目标难度：'+{'easy':'简单','medium':'中等','hard':'困难'}[q['difficulty']]+'\n\n'
             text+='\n'.join(chr(65+j)+'. '+s for j,s in enumerate(q['options']))+'\n\n'
-            text+='参考答案：'+q['answer']+'\n\n解析：'+q['explanation']+'\n\n引用片段：'+', '.join(q['citation_ids'])+'\n\n'
+            if include_answers:text+='参考答案：'+q['answer']+'\n\n解析：'+q['explanation']+'\n\n'
+            text+='引用片段：'+', '.join(q['citation_ids'])+'\n\n'
         text+='## 资料依据\n\n'
-        for source in json.loads(row['sources']):text+=f"- {source['document_name']}，第 {source['page']} 页（片段 {source['id']}）\n"
+        for source in json.loads(row['sources']):
+            text+=f"- {source['document_name']}，第 {source['page']} 页（片段 {source['id']}）\n"
+            provenance=source.get('external_source') or {}
+            if provenance:
+                text+='  原文：'+str(provenance.get('reading_url') or provenance.get('url',''))+'\n'
+                if provenance.get('attribution'):text+='  署名：'+str(provenance['attribution'])+'\n'
+                if provenance.get('license'):text+='  许可：'+str(provenance['license'])+' '+str(provenance.get('license_url',''))+'\n'
         return Response(text,media_type='text/markdown',headers={'Content-Disposition':'attachment; filename="learning-material.md"'})
     return app

@@ -73,23 +73,35 @@ def test_embeddings_restore_input_order(tmp_path):
 
 
 @pytest.mark.parametrize('repair_succeeds',[True,False])
-def test_malformed_text_gets_only_one_repair(rig,repair_succeeds):
+def test_malformed_text_repairs_obey_provider_budget(rig,monkeypatch,repair_succeeds):
     c,app,wire=rig;course,_=seed(c)
-    provider=app.state.pipeline.providers
-    original=provider.generate
+    app.state.settings.max_daily_calls=8
+    original=type(wire).__call__
     attempts=[]
-    async def generate(messages,job_id):
+    def generate(self,http_request):
+        response=original(self,http_request)
+        if not http_request.url.path.endswith('/chat/completions'):
+            return response
+        messages=json.loads(http_request.content)['messages']
         if json.loads(messages[1]['content']).get('task')=='difficulty_assessment':
-            return await original(messages,job_id)
-        attempts.append(messages.copy())
-        if len(attempts)==1 or not repair_succeeds:raise ProviderOutputError('文本 JSON 不完整。')
-        return await original(messages,job_id)
-    provider.generate=generate
+            return response
+        attempts.append(messages)
+        if len(attempts)==1 or not repair_succeeds:
+            return httpx.Response(200,json={'choices':[{'finish_reason':'stop','message':{'content':'{unfinished'}}]})
+        return response
+    monkeypatch.setattr(type(wire),'__call__',generate)
     job=done(c,c.post('/api/generations',json=request(course)))
-    assert len(attempts)==2
     assert job['status']==('succeeded' if repair_succeeds else 'failed')
-    evidence=c.get('/api/jobs/'+job['id']+'/evidence').json()
-    assert evidence['evidence']['sources'] and len(evidence['evidence']['attempts'])==2
+    evidence=c.get('/api/jobs/'+job['id']+'/evidence').json()['evidence']
+    assert evidence['sources']
+    author_attempts=[a for a in evidence['attempts'] if a['status']!='provider_error']
+    assert len(author_attempts)==len(attempts)
+    if repair_succeeds:
+        assert len(attempts)==2
+    else:
+        assert len(attempts)>3
+        assert len(app.state.store.all('SELECT id FROM calls'))==8
+        assert c.get('/api/contents',params={'course_id':course}).json()==[]
 
 
 @pytest.mark.parametrize('content',['{unfinished','{"invalid":NaN}','{"invalid":1e999}'])
@@ -108,3 +120,41 @@ def test_old_database_additive_migration_and_export_filter(tmp_path):
     legacy=store.calls_for_job('job')[0]
     assert legacy['usage']=={'prompt_tokens':4} and legacy['duration_ms'] is None
     assert store.reserve_call(None,'text','model',100)
+
+
+@pytest.mark.parametrize('status,code,hint',[
+    (503,'upstream_unavailable','模型服务暂不可用'),
+    (502,'upstream_unavailable','网关暂时异常'),
+    (500,'upstream_unavailable','模型服务暂时异常'),
+    (504,'upstream_unavailable','模型服务响应超时'),
+    (401,'authentication','密钥无效'),
+    (402,'payment_required','账户余额不足'),
+    (429,'rate_limited','平台限流'),
+    (422,'configuration','请求参数无效'),
+])
+def test_http_failure_is_classified_without_exposing_body_or_retrying(tmp_path,status,code,hint):
+    seen=[]
+    run,store=invoke(tmp_path,httpx.Response(status,json={'error':{'message':'fixture-secret'}}),
+                     check_request=lambda request:seen.append(request))
+    with pytest.raises(ProviderError) as error:asyncio.run(run())
+    assert error.value.http_status==status and error.value.code==code
+    assert hint in str(error.value) and 'fixture-secret' not in str(error.value)
+    assert len(seen)==1
+    rows=store.all('SELECT * FROM calls')
+    assert len(rows)==1 and rows[0]['status']=='failed' and rows[0]['http_status']==status
+
+
+@pytest.mark.parametrize('error_type,code,hint',[
+    (httpx.ReadTimeout,'timeout','响应超时'),
+    (httpx.ConnectError,'network','网络连接异常'),
+])
+def test_transport_failure_is_classified_without_echo_or_retry(tmp_path,error_type,code,hint):
+    seen=[]
+    def fail(request):
+        seen.append(request)
+        raise error_type('fixture-secret',request=request)
+    run,store=invoke(tmp_path,None,check_request=fail)
+    with pytest.raises(ProviderError) as error:asyncio.run(run())
+    assert error.value.code==code and error.value.http_status is None
+    assert hint in str(error.value) and 'fixture-secret' not in str(error.value)
+    assert len(seen)==1 and store.one('SELECT status FROM calls')['status']=='failed'

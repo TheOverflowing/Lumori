@@ -45,12 +45,14 @@ class Wire:
             refs=[instruction['reference_chunks'][0]['id'] if self.mode!='bad_citation' else 'invented']
             asset={'title':'检索与生成','evidence_sufficient':self.mode!='insufficient','sections':[], 'questions':[], 'visual_prompt':'课程资料到检索结果的流程图'}
             if asset['evidence_sufficient']:
-                asset['sections']=[{'heading':'知识讲解','text':'检索为生成提供参考资料。','citation_ids':refs}]
+                if req.get('include_explanations') or req['material']=='lesson':
+                    asset['sections']=[{'heading':'知识讲解','text':'检索为生成提供参考资料。','citation_ids':refs}]
                 asset['questions']=[{'kind':'mcq','stem':f'第 {i+1} 题：检索的作用？','options':['提供参考','保证正确','取代审核','更新模型参数'],'answer':'A','explanation':'参考仍需核对。','difficulty_reason':'单一概念识别','citation_ids':refs} for i in range(instruction['question_count'])]
             self.difficulty_levels=apply_difficulty_fixture(asset,instruction)
             return httpx.Response(200,json={'choices':[{'finish_reason':'stop','message':{'content':json.dumps(asset)}}]})
         if request.url.path.endswith('/audio/speech'):
             assert data['response_format']=='mp3'
+            self.speech_input=data['input']
             return httpx.Response(200,content=b'ID3transport-fixture-only',headers={'content-type':'audio/mpeg'})
         if request.url.path.endswith('/images/generations'):
             return httpx.Response(200,json={'data':[{'b64_json':base64.b64encode(b'\x89PNG\r\n\x1a\ntransport-fixture-only').decode()}]})
@@ -90,7 +92,8 @@ def seed(client):
     return course,doc
 
 def request(course,key='generate-001'):
-    return dict(course_id=course,topic='检索的作用',count=1,question_type='mcq',request_key=key)
+    return dict(course_id=course,topic='检索的作用',count=1,question_type='mcq',request_key=key,
+                include_explanations=True)
 
 def generated(client,course):
     job=done(client,client.post('/api/generations',json=request(course)))
@@ -121,13 +124,30 @@ def test_full_review_media_version_workflow(rig):
     assert c.get('/api/learn/'+cid).json()['media']==[]
     assert c.post('/api/media/'+content['media'][0]['id']+'/approve',json={'version':1}).status_code==409
 
+def test_questions_only_assessment_audio_has_prompts_but_no_answers(rig):
+    client,app,wire=rig
+    course,_=seed(client)
+    payload=request(course,'questions-only-audio') | {'include_explanations':False}
+    generated_job=done(client,client.post('/api/generations',json=payload))
+    assert generated_job['status']=='succeeded',generated_job
+    cid=generated_job['result']['content_id']
+    asset=client.get('/api/contents/'+cid).json()['asset']
+    assert asset['sections']==[]
+    assert client.post('/api/contents/'+cid+'/review',json={'version':1,'action':'approve'}).status_code==200
+    media_job=done(client,client.post('/api/contents/'+cid+'/media',json={
+        'version':1,'kind':'audio','request_key':'questions-only-speech'}))
+    assert media_job['status']=='succeeded',media_job
+    assert asset['questions'][0]['stem'] in wire.speech_input
+    assert 'A. 提供参考' in wire.speech_input
+    assert asset['questions'][0]['explanation'] not in wire.speech_input
+
 @pytest.mark.parametrize('mode,status',[('bad_citation','failed'),('insufficient','insufficient_evidence')])
 def test_invalid_or_insufficient_never_published(rig,mode,status):
     c,app,wire=rig;course,_=seed(c);wire.mode=mode
     assert done(c,c.post('/api/generations',json=request(course)))['status']==status
     assert c.get('/api/contents',params={'course_id':course}).json()==[]
     text_calls=app.state.store.all("SELECT * FROM calls WHERE capability='text'")
-    assert len(text_calls)==(2 if mode=='bad_citation' else 1)
+    assert len(text_calls)==(3 if mode=='bad_citation' else 1)
 
 def test_signature_change_blocks_stale_vectors(rig):
     c,app,wire=rig;course,_=seed(c)

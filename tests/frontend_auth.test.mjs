@@ -27,6 +27,81 @@ test('signed-out client refuses protected reads and mutations without contacting
   assert.equal(requests.length,0);
 });
 
+test('binary exports retain account scope and decode safe attachment filenames', async () => {
+  const bytes = new Blob(['%PDF-1.4'],{type:'application/pdf'});
+  const {client,requests} = clientWith([response(session(userA)),{
+    ok:true,status:200,blob:async()=>bytes,
+    headers:new Headers({'Content-Disposition':"attachment; filename*=UTF-8''%E5%AD%A6%E4%B9%A0.pdf"}),
+    json:()=>{throw new Error('Binary download must not consume JSON');},
+  }]);
+  await client.restore();
+  const result=await client.request('/contents/own/export?format=pdf','GET',undefined,{responseType:'blob'});
+  assert.equal(result.blob,bytes); assert.equal(result.filename,'学习.pdf');
+  assert.equal(requests[1].headers['X-Account-ID'],userA.id);
+});
+
+test('binary download is discarded if its body arrives after an account switch', async () => {
+  const body=deferred();
+  const {client}=clientWith([response(session(userA)),{ok:true,status:200,blob:()=>body.promise},response(session(userB))]);
+  await client.restore(); const download=client.request('/contents/own/export','GET',undefined,{responseType:'blob'});
+  await Promise.resolve(); await client.authenticate('login',{email:userB.email,password:'test password'});
+  body.resolve(new Blob(['private file']));
+  await assert.rejects(download,isSessionChange);
+});
+
+test('canceling one document transfer aborts its transport without changing the account or other requests', async () => {
+  const active=deferred(), other=deferred();
+  const {client,requests}=clientWith([
+    response(session(userA)),
+    (_url,options)=>{options.signal.addEventListener('abort',()=>active.resolve({ok:true,blob:async()=>{throw new DOMException('User canceled','AbortError');}}),{once:true});return active.promise;},
+    ()=>other.promise,
+  ]);
+  await client.restore();
+  const epoch=client.epoch, controller=new AbortController();
+  const download=client.request('/contents/own/export','GET',undefined,{responseType:'blob',signal:controller.signal});
+  const courses=client.request('/courses');
+  controller.abort();
+  await assert.rejects(download,error=>error.name==='AbortError' && !isSessionChange(error));
+  assert.equal(requests[1].signal.aborted,true);
+  assert.equal(requests[2].signal.aborted,false);
+  assert.equal(client.epoch,epoch);
+  assert.equal(client.session.user.id,userA.id);
+  other.resolve(response([{id:'course'}]));
+  assert.deepEqual(await courses,[{id:'course'}]);
+});
+
+test('a binary body interruption without account invalidation is not misclassified as a session change', async () => {
+  const {client}=clientWith([
+    response(session(userA)),
+    {ok:true,status:200,blob:async()=>{throw new DOMException('Body interrupted','AbortError');}},
+  ]);
+  await client.restore();
+  const epoch=client.epoch;
+  await assert.rejects(client.request('/contents/own/export','GET',undefined,{responseType:'blob'}),
+    error=>error.name==='AbortError' && !isSessionChange(error));
+  assert.equal(client.epoch,epoch);
+  assert.equal(client.session.user.id,userA.id);
+});
+
+test('caller abort listeners are removed after a successful document transfer', async () => {
+  const controller=new AbortController();
+  const signal=controller.signal;
+  let added=0, removed=0;
+  const add=signal.addEventListener.bind(signal), remove=signal.removeEventListener.bind(signal);
+  signal.addEventListener=(name,...args)=>{if(name==='abort')added++;return add(name,...args);};
+  signal.removeEventListener=(name,...args)=>{if(name==='abort')removed++;return remove(name,...args);};
+  const {client,requests}=clientWith([
+    response(session(userA)),
+    {ok:true,status:200,blob:async()=>new Blob(['file']),headers:new Headers()},
+  ]);
+  await client.restore();
+  await client.request('/contents/own/export','GET',undefined,{responseType:'blob',signal});
+  assert.equal(added,1);
+  assert.equal(removed,1);
+  controller.abort();
+  assert.equal(requests[1].signal.aborted,false);
+});
+
 test('restored account scopes every fetch and sends CSRF only on mutations', async () => {
   const {client,requests} = clientWith([response(session(userA)),response([]),response({id:'course'})]);
   await client.restore(); await client.request('/courses'); await client.request('/courses','POST',{name:'Course'});

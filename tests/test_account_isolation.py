@@ -21,6 +21,9 @@ PASSWORD = 'An isolated account password 42!'
 
 # Every business route must reject anonymous requests before inspecting inputs.
 BUSINESS_ROUTES = [
+    ('PATCH','/api/documents/{did}'),
+    ('DELETE','/api/documents/{did}'),
+    ('POST','/api/documents/{did}/restore'),
     ('GET', '/api/documents/{did}/figures'),
     ('POST', '/api/documents/{did}/figures/retry'),
     ('PATCH', '/api/documents/{did}/figures/{aid}'),
@@ -36,14 +39,18 @@ BUSINESS_ROUTES = [
     ('POST', '/api/documents/{did}/parse'),
     ('POST', '/api/documents/{did}/index'),
     ('POST', '/api/generations'),
+    ('POST', '/api/generations/prepare'),
     ('GET', '/api/jobs'),
     ('GET', '/api/jobs/{jid}'),
     ('GET', '/api/jobs/{jid}/evidence'),
+    ('POST', '/api/jobs/{jid}/resume'),
+    ('GET', '/api/jobs/{jid}/generation-request'),
     ('GET', '/api/contents'),
     ('GET', '/api/contents/{cid}'),
     ('POST', '/api/contents/{cid}/review'),
     ('POST', '/api/contents/{cid}/media'),
     ('GET', '/api/media/{mid}/file'),
+    ('GET', '/api/media/{mid}/download'),
     ('POST', '/api/media/{mid}/approve'),
     ('GET', '/api/learn/{cid}'),
     ('POST', '/api/contents/{cid}/evaluations'),

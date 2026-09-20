@@ -19,6 +19,8 @@ def parse_upload(settings, name, raw):
 
 def parsed_chunks(report, configuration, raw_digest, max_chunks):
     pages = report['pages']
+    external_source = report.get('external_source')
+    external_source = external_source if isinstance(external_source, dict) else {}
     chunks = chunk_pages([page['text'] for page in pages], **configuration)
     for chunk in chunks:
         page = pages[chunk['page'] - 1]
@@ -27,6 +29,11 @@ def parsed_chunks(report, configuration, raw_digest, max_chunks):
             extraction_method=page['method'], extraction_status=page['status'],
             extraction_warnings=page['warnings'], source_asset_ids=page['asset_ids'],
             coordinate_basis='extracted_page_text', ocr_accuracy_verified=False)
+        if isinstance(external_source.get('url'), str) and external_source['url']:
+            # Preserve the same origin used at initial auto-exploration import.
+            chunk['metadata'].update(origin='auto_exploration', source_url=external_source['url'])
+            if isinstance(external_source.get('title'), str):
+                chunk['metadata']['source_title'] = external_source['title']
     if len(chunks) > max_chunks:
         raise ValueError(f'解析片段超过 {max_chunks} 个，请按章节拆分资料。')
     return chunks
@@ -45,8 +52,10 @@ def summary(report):
         'warnings': report['warnings'], 'elapsed_seconds': report['elapsed_seconds']}
 
 
-def store_assets(settings, document_id, parsed):
+def store_assets(settings, document_id, parsed, *, external_source=None):
     report = parsed.report()
+    if isinstance(external_source, dict):
+        report['external_source'] = json.loads(dumps(external_source))
     parse_id = uid()
     directory = settings.data_dir / 'document_assets' / document_id / parse_id
     report['source_document_sha256'] = None  # Filled by the caller from the original bytes.

@@ -177,6 +177,8 @@ html[data-theme="dark"] .learner-profile textarea {
 .select-field select { width: 100%; text-overflow: ellipsis; }
 .compose-options .select-field select { margin-top: 7px; }
 .difficulty-controls { margin-top: 24px; padding-top: 22px; }
+.explanation-option { margin:18px 0 0; padding:0; border:0; }
+.explanation-option .preference-switch { min-height:44px; padding:10px 0; }
 .difficulty-controls legend { color: var(--secondary); font-size: .76rem; }
 .difficulty-controls .select-field { max-width: 280px; }
 .difficulty-mode { gap: 4px; }
@@ -399,3 +401,15 @@ html[data-theme="dark"] .search input { padding-left: 39px; }
   .number-stepper button.stepper-button[aria-disabled="true"],
   html[data-theme="dark"] .number-stepper button.stepper-button[aria-disabled="true"] { opacity: .65; }
 }
+
+/* The page owns file-picker copy; the native input still owns selection and upload. */
+.file-field { margin: 18px 0; font-size: .86rem; }
+.localized-file-picker { position: relative; display: flex; align-items: center; gap: 16px; min-height: 92px; padding: 18px; margin: 8px 0 0; border: 1px dashed var(--field-border); border-radius: 16px; background: var(--field-fill); cursor: pointer; }
+.localized-file-picker .localized-file-input { position: absolute; width: 1px; height: 1px; min-height: 0; padding: 0; margin: 0; border: 0; clip-path: inset(50%); overflow: hidden; }
+.file-picker-button { flex-shrink: 0; display: inline-flex; align-items: center; min-height: 44px; padding: 10px 14px; border: 1px solid var(--field-border); border-radius: 11px; background: var(--paper); }
+.localized-file-picker [data-file-name] { min-width: 0; overflow-wrap: anywhere; color: var(--secondary); }
+.localized-file-picker:focus-within { outline: 2px solid var(--field-focus-border); outline-offset: 3px; }
+@media (max-width: 480px) { .localized-file-picker { flex-wrap: wrap; gap: 10px; padding: 14px; } }
+
+.difficulty-adjusted-label { display:inline-block; margin-left:12px; color:var(--secondary); font-weight:400; }
+.difficulty-adjustment-detail>summary { min-height:44px; display:flex; align-items:center; cursor:pointer; }

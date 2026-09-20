@@ -80,6 +80,40 @@ class Settings:
     document_visual_max_pages: int = 30
     document_parse_timeout: float = 120
     max_daily_calls: int = 100
+    exploration_enabled: bool = True
+    exploration_search_provider: str = 'curated'
+    exploration_dns_mode: str = 'auto'
+    exploration_search_api_key: str = field(default='', repr=False)
+    exploration_max_rounds: int = 2
+    exploration_max_documents: int = 5
+    exploration_max_candidates: int = 12
+    exploration_max_source_pages: int = 20
+    exploration_max_source_chunks: int = 100
+    exploration_max_search_calls: int = 8
+    exploration_max_seconds: float = 180
+    exploration_max_model_calls: int = 10
+    exploration_max_bytes: int = 10 * 1024 * 1024
+    exploration_fetch_timeout: float = 20
+    # Direct Settings() retains the frozen offline baseline; the web/env default is agent_v1.
+    generation_workflow: str = 'legacy_v3'
+    agent_max_calls: int = 180
+    agent_max_repairs: int = 1
+    agent_context_chars: int = 48000
+    # Optional candidate runtime. Native remains the measured/default workflow.
+    agent_runtime: str = 'native'
+    # Experimental bounded supervisor planning; sequential_v1 preserves existing behavior.
+    agent_orchestration: str = 'sequential_v1'
+    agent_plan_batch_size: int = 8
+    # Explicit experimental specialization; never infer a course from keywords.
+    agent_question_spec: str = 'none'
+    harness_python: Path = ROOT / '.venv-harness/bin/python'
+    harness_executable: Path = ROOT / '.venv-harness/bin/dsh'
+    harness_timeout: float = 240
+    harness_max_requests: int = 6
+    harness_max_output_tokens: int = 4096
+    harness_reasoning_effort: str = 'off'
+    harness_response_format: str = 'text'
+    harness_schema_repairs: int = 0
     workers: int = 2
     auth_cookie_name: str = 'fyp_session'
     auth_cookie_secure: bool = False
@@ -134,6 +168,36 @@ class Settings:
                    chunk_max_chars=int(os.getenv('CHUNK_MAX_CHARS', '1200')),
                    chunk_overlap_chars=int(os.getenv('CHUNK_OVERLAP_CHARS', '120')),
                    max_daily_calls=max(1, int(os.getenv('MAX_DAILY_API_CALLS', '100'))),
+                   exploration_enabled=os.getenv('EXPLORATION_ENABLED','true').lower() in ('true','1','yes'),
+                   exploration_search_provider=os.getenv('EXPLORATION_SEARCH_PROVIDER','curated'),
+                   exploration_dns_mode=os.getenv('EXPLORATION_DNS_MODE','auto'),
+                   exploration_search_api_key=os.getenv('EXPLORATION_SEARCH_API_KEY',''),
+                   exploration_max_rounds=max(1,min(3,int(os.getenv('EXPLORATION_MAX_ROUNDS','2')))),
+                   exploration_max_documents=max(1,min(5,int(os.getenv('EXPLORATION_MAX_DOCUMENTS','5')))),
+                   exploration_max_candidates=max(1,min(20,int(os.getenv('EXPLORATION_MAX_CANDIDATES','12')))),
+                   exploration_max_source_pages=max(1,min(50,int(os.getenv('EXPLORATION_MAX_SOURCE_PAGES','20')))),
+                   exploration_max_source_chunks=max(1,min(100,int(os.getenv('EXPLORATION_MAX_SOURCE_CHUNKS','100')))),
+                   exploration_max_search_calls=max(1,min(12,int(os.getenv('EXPLORATION_MAX_SEARCH_CALLS','8')))),
+                   exploration_max_seconds=max(10,min(600,float(os.getenv('EXPLORATION_MAX_SECONDS','180')))),
+                   exploration_max_model_calls=max(1,min(20,int(os.getenv('EXPLORATION_MAX_MODEL_CALLS','10')))),
+                   exploration_max_bytes=max(1024,min(10*1024*1024,int(os.getenv('EXPLORATION_MAX_BYTES',str(10*1024*1024))))),
+                   exploration_fetch_timeout=max(1,min(30,float(os.getenv('EXPLORATION_FETCH_TIMEOUT','20')))),
+                   generation_workflow=os.getenv('GENERATION_WORKFLOW', 'agent_v1'),
+                   agent_max_calls=max(1, min(300, int(os.getenv('AGENT_MAX_CALLS', '180')))),
+                   agent_max_repairs=max(0, min(2, int(os.getenv('AGENT_MAX_REPAIRS', '1')))),
+                   agent_context_chars=max(4000, min(100000, int(os.getenv('AGENT_CONTEXT_CHARS', '48000')))),
+                   agent_runtime=os.getenv('AGENT_RUNTIME', 'native'),
+                   agent_orchestration=os.getenv('AGENT_ORCHESTRATION', 'sequential_v1'),
+                   agent_plan_batch_size=max(1, min(10, int(os.getenv('AGENT_PLAN_BATCH_SIZE', '8')))),
+                   agent_question_spec=os.getenv('AGENT_QUESTION_SPEC', 'none'),
+                   harness_python=Path(os.getenv('HARNESS_PYTHON', str(ROOT/'.venv-harness/bin/python'))),
+                   harness_executable=Path(os.getenv('HARNESS_EXECUTABLE', str(ROOT/'.venv-harness/bin/dsh'))),
+                   harness_timeout=max(10, min(600, float(os.getenv('HARNESS_TIMEOUT', '240')))),
+                   harness_max_requests=max(1, min(12, int(os.getenv('HARNESS_MAX_REQUESTS', '6')))),
+                   harness_max_output_tokens=max(256, min(32768, int(os.getenv('HARNESS_MAX_OUTPUT_TOKENS', '4096')))),
+                   harness_reasoning_effort=os.getenv('HARNESS_REASONING_EFFORT', 'off'),
+                   harness_response_format=os.getenv('HARNESS_RESPONSE_FORMAT', 'text'),
+                   harness_schema_repairs=max(0, min(1, int(os.getenv('HARNESS_SCHEMA_REPAIRS', '0')))),
                    document_ocr_engine=os.getenv('DOCUMENT_OCR_ENGINE', 'tesseract'),
                    document_ocr_languages=os.getenv('DOCUMENT_OCR_LANGUAGES', 'chi_sim+eng'),
                    document_ocr_max_pages=max(0, int(os.getenv('DOCUMENT_OCR_MAX_PAGES', '30'))),

@@ -10,6 +10,7 @@ from .figure_schema import validate_description
 from .rag_runtime import document_input
 from .retrieval import normalize_vectors
 from .store import dumps,now,uid
+from .document_lifecycle import ACTIVE_SQL
 
 PROMPT_VERSION='figure-semantics-v2'
 
@@ -37,6 +38,7 @@ def source_bytes(pipeline,did):
 
 async def parse_document(pipeline,payload,jobid):
     from .pipeline import document_chunk_ids
+    from .exploration_policy import document_source
     did=payload['document_id'];settings=pipeline.settings;store=pipeline.store
     async with pipeline.index_locks.setdefault(did,asyncio.Lock()):
         doc,raw=await asyncio.to_thread(source_bytes,pipeline,did)
@@ -44,10 +46,11 @@ async def parse_document(pipeline,payload,jobid):
         async with pipeline.document_worker_slot:
             parsed=await document_backends.parse(settings,doc['name'],raw,options['tier'])
         configuration=pipeline.chunking_configuration()
-        chunks=document_chunk_ids(document_storage.parsed_chunks(parsed.report(),configuration,doc['sha256'],settings.max_chunks),did)
-        report,directory=document_storage.store_assets(settings,did,parsed)
+        report,directory=document_storage.store_assets(settings,did,parsed,
+            external_source=document_source(store,did))
         report.update(source_document_sha256=doc['sha256'],options=options,figure_extraction='pending' if options['images'] else 'disabled')
         try:
+            chunks=document_chunk_ids(document_storage.parsed_chunks(report,configuration,doc['sha256'],settings.max_chunks),did)
             with store.connect() as db:
                 db.execute('DELETE FROM chunks WHERE document_id=?',(did,))
                 store.save_chunks(db,did,chunks,configuration)
@@ -178,7 +181,7 @@ async def enrich(pipeline,payload,jobid):
 
 def retrieval_rows(pipeline,course_id,document_ids=None):
     rows=pipeline.store.all('''SELECT f.*,d.name AS document_name FROM figure_semantics f JOIN documents d ON d.id=f.document_id
-        WHERE d.course_id=? AND d.status='ready' AND f.status='ready' AND f.vector IS NOT NULL AND f.embedding_signature=?''',
+        WHERE d.course_id=? AND d.status='ready' AND f.status='ready' AND f.vector IS NOT NULL AND f.embedding_signature=? AND '''+ACTIVE_SQL,
         (course_id,pipeline.embedding_signature()))
     active={}
     result=[]

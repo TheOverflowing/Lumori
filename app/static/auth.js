@@ -18,7 +18,7 @@ export function createSessionClient({fetchImpl = (...args) => fetch(...args), on
     onSession(session, {changed:changed || force, reason});
     return session;
   }
-  async function request(path, method = 'GET', data, {publicRequest = false} = {}) {
+  async function request(path, method = 'GET', data, {publicRequest = false, responseType = 'json', signal} = {}) {
     if (!publicRequest && !session.user) throw new SessionChangedError();
     const started = epoch, controller = new AbortController();
     const headers = {};
@@ -29,9 +29,23 @@ export function createSessionClient({fetchImpl = (...args) => fetch(...args), on
     }
     if (typeof FormData !== 'undefined' && data instanceof FormData) options.body = data;
     else if (data !== undefined) { headers['Content-Type'] = 'application/json'; options.body = JSON.stringify(data); }
+    const cancel = () => controller.abort();
+    signal?.addEventListener('abort',cancel,{once:true});
+    if(signal?.aborted)controller.abort();
     pending.add(controller);
     try {
       const response = await fetchImpl('/api' + path, options);
+      if (response.ok && responseType === 'blob') {
+        const blob = await response.blob();
+        if (started !== epoch) throw new SessionChangedError();
+        const disposition = response.headers?.get('Content-Disposition') || '';
+        let filename = '';
+        const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+        try { filename = encoded ? decodeURIComponent(encoded[1]) : disposition.match(/filename="([^"]+)"/i)?.[1] || ''; }
+        catch { /* Let the download use a safe default name. */ }
+        filename = filename.replace(/[\\/\x00-\x1f\x7f]/g,'_');
+        return {blob, filename};
+      }
       let result; try { result = await response.json(); } catch { result = {}; }
       if (started !== epoch) throw new SessionChangedError();
       if (!response.ok) {
@@ -58,9 +72,9 @@ export function createSessionClient({fetchImpl = (...args) => fetch(...args), on
       }
       return result;
     } catch (error) {
-      if (started !== epoch || error.name === 'AbortError') throw new SessionChangedError();
+      if (started !== epoch) throw new SessionChangedError();
       throw error;
-    } finally { pending.delete(controller); }
+    } finally { signal?.removeEventListener('abort',cancel); pending.delete(controller); }
   }
   return {
     get session() { return session; },

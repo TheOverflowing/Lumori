@@ -1,0 +1,22 @@
+{
+  "NotoSans-Regular.ttf": {
+    "sha256": "b85c38ecea8a7cfb39c24e395a4007474fa5a4fc864f6ee33309eb4948d232d5",
+    "bytes": 569208
+  },
+  "NotoSansMath-Regular.ttf": {
+    "sha256": "80b61fd613d3519197e64fff6f7e71fdc7f3e6526440ea4115b554ef7fd59af7",
+    "bytes": 590904
+  },
+  "NotoSansMono-Regular.ttf": {
+    "sha256": "d9e2b23d19f8230be7146f409a52b1d23117e635e28f2e2892cf91b7382f325b",
+    "bytes": 512836
+  },
+  "NotoSans-Bold.ttf": {
+    "sha256": "c976e4b1b99edc88775377fcc21692ca4bfa46b6d6ca6522bfda505b28ff9d6a",
+    "bytes": 575740
+  },
+  "NotoSansSC-Regular.ttf": {
+    "sha256": "b199e57a335d4b604155fa287b16cec3dd7b193da9ea34161952aa673ae11ae5",
+    "bytes": 10596272
+  }
+}

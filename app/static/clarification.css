@@ -1,0 +1,18 @@
+/* Shared switch geometry keeps this preference aligned with document controls. */
+.preference-switch.clarification-check { margin-top:22px; padding:10px 0; }
+.clarification-original { margin:20px 0 0; border-top:1px solid var(--line); padding-top:10px; }
+.clarification-original summary { cursor:pointer; min-height:44px; padding:11px 0; color:var(--secondary); font-size:.78rem; font-weight:450; }
+.clarification-original summary:focus-visible { outline:3px solid var(--blue); outline-offset:3px; border-radius:6px; }
+.clarification-original p { margin:2px 0 12px; font-size:.82rem; line-height:1.75; white-space:pre-wrap; overflow-wrap:anywhere; max-height:150px; overflow:auto; }
+.clarification-question { font-size:1rem; line-height:1.7; color:var(--text); white-space:pre-wrap; overflow-wrap:anywhere; margin:0 0 20px; }
+.clarification-options { margin:0 0 22px; }
+.clarification-options>div { display:grid; gap:8px; }
+.clarification-options button { justify-content:flex-start; min-height:44px; padding:12px 14px; text-align:left; white-space:normal; overflow-wrap:anywhere; font-size:.82rem; font-weight:450; line-height:1.5; }
+.clarification-options button[aria-pressed=true] { background:var(--blue-soft); color:var(--blue); box-shadow:inset 0 0 0 1px currentColor; }
+.clarification-actions { flex-wrap:wrap; gap:8px; margin-top:22px; }
+.clarification-actions button { min-height:44px; white-space:normal; }
+.clarification-actions [data-clarification-cancel] { margin-right:auto; }
+.clarification-unavailable { font-size:.9rem; line-height:1.7; margin:0; }
+#clarification-form textarea { min-height:100px; margin-top:9px; }
+#clarification-form[aria-busy] { cursor:progress; }
+@media(max-width:560px) { .clarification-actions button { flex:1 1 auto; } .clarification-actions [type=submit] { flex-basis:100%; } }

@@ -14,6 +14,11 @@
   <link rel="stylesheet" href="/static/inputs.css">
   <link rel="stylesheet" href="/static/auth.css">
   <link rel="stylesheet" href="/static/parsing.css">
+  <link rel="stylesheet" href="/static/clarification.css">
+  <link rel="stylesheet" href="/static/settings.css">
+  <link rel="stylesheet" href="/static/generation-progress.css">
+  <link rel="stylesheet" href="/static/citations.css">
+  <link rel="stylesheet" href="/static/content-review.css">
   <script type="module" src="/static/app.js"></script>
 </head>
 <body>
@@ -35,7 +40,7 @@
         <a href="#contents" data-page="contents" data-i18n-data-short-label="内容" data-short-label="内容" data-i18n-aria-label="内容与审核" aria-label="内容与审核"><img src="/static/icons/book-open.svg" alt=""><span data-i18n="内容与审核">内容与审核</span></a>
         <a href="#jobs" data-page="jobs" data-i18n-data-short-label="任务" data-short-label="任务" data-i18n-aria-label="任务记录" aria-label="任务记录"><img src="/static/icons/clock-3.svg" alt=""><span data-i18n="任务记录">任务记录</span></a>
       </nav>
-      <div class="sidebar-bottom"><button class="settings" data-action="settings" data-i18n-aria-label="模型连接" aria-label="模型连接" data-i18n-title="模型连接" title="模型连接"><img src="/static/icons/settings-2.svg" alt=""><span data-i18n="模型连接">模型连接</span></button></div>
+      <div class="sidebar-bottom"><button class="settings" data-action="settings" data-i18n-aria-label="设置" aria-label="设置" data-i18n-title="设置" title="设置"><img src="/static/icons/settings-2.svg" alt=""><span data-i18n="设置">设置</span></button></div>
     </aside>
     <div class="app-main">
       <header class="toolbar"><div class="breadcrumb"><span id="route-label"><span data-i18n="课程概览">课程概览</span></span></div><div class="toolbar-right"><div id="toolbar-actions"></div><button id="account-button" class="plain account-button" data-action="account" data-i18n-aria-label="账号" aria-label="账号"><span id="account-initial" aria-hidden="true"></span><span id="account-name"></span></button><div class="appearance-controls" role="group" data-i18n-aria-label="外观与语言" aria-label="外观与语言"><button id="theme-toggle" data-theme-toggle class="plain icon-button" type="button" aria-label="切换到深色模式" title="切换到深色模式"><img src="/static/icons/moon.svg" alt=""></button><button id="language-toggle" data-language-toggle class="plain" type="button" aria-label="Switch to English" title="Switch to English" lang="en">EN</button></div></div></header>

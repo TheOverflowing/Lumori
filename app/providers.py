@@ -8,7 +8,12 @@ import time
 import numpy as np
 import httpx
 
-class ProviderError(Exception): pass
+class ProviderError(Exception):
+    """Safe local message plus optional transport classification, never upstream text."""
+    def __init__(self, message, *, http_status=None, code=None):
+        self.http_status=http_status
+        self.code=code
+        super().__init__(message)
 
 class ProviderOutputError(ProviderError):
     """A completed text response that permits one bounded structural repair."""
@@ -50,10 +55,18 @@ class ApiProviders:
                 http_status=resp.status_code
                 if not 200<=http_status<300:
                     # Never persist upstream error bodies; they can echo keys or source material.
-                    hints={401:'密钥无效或已失效',402:'账户余额不足',403:'密钥权限或区域不可用',
-                           404:'模型或接口路径不存在',429:'平台限流或额度已用尽'}
+                    hints={400:'请求格式无效',401:'密钥无效或已失效',402:'账户余额不足',403:'密钥权限或区域不可用',
+                           404:'模型或接口路径不存在',422:'请求参数无效',429:'平台限流或额度已用尽',
+                           500:'模型服务暂时异常，请稍后重试',502:'模型服务网关暂时异常，请稍后重试',
+                           503:'模型服务暂不可用或繁忙，请稍后重试',504:'模型服务响应超时，请稍后重试'}
                     hint=hints.get(http_status,'请核对平台、模型及参数')
-                    raise ProviderError(f'{capability} API 返回 HTTP {http_status}；{hint}。本次未自动重试。')
+                    code=('upstream_unavailable' if http_status in (500,502,503,504) else
+                          'rate_limited' if http_status==429 else
+                          'authentication' if http_status in (401,403) else
+                          'payment_required' if http_status==402 else
+                          'configuration' if http_status in (400,404,422) else 'http_error')
+                    raise ProviderError(f'{capability} API 返回 HTTP {http_status}；{hint}。本次未自动重试。',
+                                        http_status=http_status,code=code)
                 chunks=[];size=0
                 async for chunk in resp.aiter_bytes():
                     size+=len(chunk)
@@ -74,7 +87,11 @@ class ApiProviders:
             return result
         except (httpx.HTTPError,ValueError,ProviderError) as exc:
             if isinstance(exc,ProviderError):raise
-            raise ProviderError(f'{capability} API 网络超时或响应格式错误；本次未自动重试。') from None
+            if isinstance(exc,httpx.TimeoutException):
+                raise ProviderError(f'{capability} API 响应超时，请稍后重试。本次未自动重试。',code='timeout',http_status=http_status) from None
+            if isinstance(exc,httpx.HTTPError):
+                raise ProviderError(f'{capability} API 网络连接异常，请稍后重试。本次未自动重试。',code='network',http_status=http_status) from None
+            raise ProviderError(f'{capability} API 响应格式错误；本次未自动重试。',code='invalid_response',http_status=http_status) from None
         finally:
             self.store.execute('UPDATE calls SET status=?,usage=?,duration_ms=?,http_status=?,response_model=? WHERE id=?',
                 (status,json.dumps(usage,allow_nan=False),round((time.perf_counter()-started)*1000),http_status,response_model,call_id))

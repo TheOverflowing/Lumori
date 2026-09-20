@@ -15,9 +15,9 @@ const warningLabels = {
 export function parsingDialog(report, documentId) {
   const id = esc(documentId);
   const actions = `${parserControls(report.options)}<div class="parsing-actions"><a class="button secondary" href="/api/documents/${id}/source">${m('下载原文件')}</a><button class="secondary" data-action="reparse" data-id="${id}">${m('重新解析（需重建索引）')}</button>${report.options?.images?`<button class="secondary" data-action="retry-figure" data-id="${id}">${m('重试或更新图片索引')}</button>`:''}</div>`;
-  if (!report.available) return `<p>${m('这份旧资料暂无逐页解析报告。重新解析后可对照原图，并需要重新建立索引。')}</p>${actions}`;
+  if (!report.available) return `<p>${m('暂无解析报告')}</p>${actions}`;
   const metrics = report.metrics;
-  return `<p class="parsing-summary">${m('有文字的页面：{readable} / {total}',{readable:metrics.pages_with_text,total:metrics.page_count})} · ${m(parsingLabel(report.status))}</p><p class="muted">${m('页面有文字不代表识别准确。图意说明单独标记为 AI 生成，请对照原图核验。')}</p>${actions}<label>${m('选择页面')}<select id="parsing-page">${report.pages.map(p=>`<option value="${p.number}">${p.number} · ${esc(p.method)}</option>`).join('')}</select></label><div id="parsing-detail"></div>`;
+  return `<p class="parsing-summary">${m('有文字的页面：{readable} / {total}',{readable:metrics.pages_with_text,total:metrics.page_count})} · ${m(parsingLabel(report.status))}</p>${actions}<label>${m('选择页面')}<select id="parsing-page">${report.pages.map(p=>`<option value="${p.number}">${p.number} · ${esc(p.method)}</option>`).join('')}</select></label><div id="parsing-detail"></div>`;
 }
 export function parsingPage(report, number) {
   const page = report.pages.find(p=>p.number === Number(number)) || report.pages[0];
@@ -29,7 +29,7 @@ export function parsingPage(report, number) {
 }
 
 export function parserControls(options={}) {
-  return `<fieldset class="parser-options"><legend>${m('解析选项')}</legend><label>${m('MinerU 解析档位')}<select name="tier"><option value="standard" ${options.tier!=='advanced'?'selected':''}>Standard</option><option value="advanced" ${options.tier==='advanced'?'selected':''}>Advanced</option></select></label><p class="muted">${m('Standard 适合日常资料；Advanced 使用更深入的解析流程，可能耗时更长。')} ${m('TXT 和 Markdown 直接读取文字。')}</p><label class="figure-toggle"><input type="checkbox" name="images" value="true" ${options.images?'checked':''}>${m('理解配图并加入检索')}</label><p class="muted">${m('启用后，Docling 裁切的图片及相关文字会发送给已配置的视觉模型，再生成可检索的说明。关闭不会影响扫描件 OCR。')}</p></fieldset>`;
+  return `<fieldset class="parser-options"><legend>${m('解析选项')}</legend><label>${m('MinerU 解析档位')}<select name="tier"><option value="standard" ${options.tier!=='advanced'?'selected':''}>Standard</option><option value="advanced" ${options.tier==='advanced'?'selected':''}>Advanced</option></select></label><label class="figure-toggle"><input type="checkbox" name="images" value="true" ${options.images?'checked':''}>${m('理解配图并加入检索')}</label></fieldset>`;
 }
 
 export function figureCard(figure, documentId) {

@@ -28,19 +28,15 @@ function inLanguage(language, callback) {
   }
 }
 
-test('Chinese and English reports distinguish text coverage from recognition accuracy', () => {
+test('Chinese and English reports show text coverage without claiming recognition accuracy', () => {
   inLanguage('zh-CN', () => {
     const html = parsingDialog(report(), 'doc-a');
     assert.match(visibleText(html), /有文字的页面：1 \/ 2/);
-    assert.match(visibleText(html), /页面有文字不代表识别准确/);
-    assert.match(visibleText(html), /图意说明单独标记为 AI 生成/);
     assert.match(visibleText(html), /重新解析（需重建索引）/);
   });
   inLanguage('en', () => {
     const html = parsingDialog(report(), 'doc-a');
     assert.match(visibleText(html), /Pages with text: 1 \/ 2/);
-    assert.match(visibleText(html), /Text coverage is not recognition accuracy/);
-    assert.match(visibleText(html), /AI figure descriptions are labelled separately/);
     assert.doesNotMatch(visibleText(html), /页面|重新解析|选择页面/);
     assert.doesNotMatch(visibleText(html + parsingPage(report(), 1)), /99\.2|100%|accuracy:\s*\d/i);
   });
@@ -80,13 +76,13 @@ test('document and visual identifiers remain inside quoted attributes', () => in
 test('older documents keep the download and explicit reparse entry without pretending a report exists', () => {
   inLanguage('en', () => {
     const html = parsingDialog({available:false}, 'legacy-doc');
-    assert.match(visibleText(html), /no page-level parsing report/);
-    assert.match(visibleText(html), /rebuild its index/);
+    assert.match(visibleText(html), /No parsing report yet/);
+    assert.match(visibleText(html), /reindex required/);
     assert.match(html, /href="\/api\/documents\/legacy-doc\/source"/);
     assert.match(html, /data-action="reparse" data-id="legacy-doc"/);
     assert.doesNotMatch(html, /id="parsing-page"|Pages with text:/);
   });
-  inLanguage('zh-CN', () => assert.match(visibleText(parsingDialog({available:false}, 'legacy-doc')), /暂无逐页解析报告/));
+  inLanguage('zh-CN', () => assert.match(visibleText(parsingDialog({available:false}, 'legacy-doc')), /暂无解析报告/));
 });
 
 test('changing the selected page shows only that page text and visual assets', () => inLanguage('en', () => {
@@ -134,7 +130,7 @@ test('new parser options are opt-in and localized',async()=>{
     assert.match(html,/Standard/);assert.match(html,/Advanced/);
     assert.match(html,/type="checkbox" name="images" value="true" >/);
     assert.doesNotMatch(visibleText(html),/[\u4e00-\u9fff]/);
-    assert.match(visibleText(html),/does not disable OCR/);
+    assert.match(visibleText(html),/Understand figures and include them in retrieval/);
     assert.match(parserControls({tier:'advanced',images:true}),/value="advanced" selected/);
   });
 });

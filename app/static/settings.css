@@ -1,0 +1,25 @@
+.preference-switch { width:100%; justify-content:space-between; gap:20px; white-space:normal; margin:0; padding:7px 0; color:var(--text); font-size:.84rem; font-weight:450; line-height:1.5; }
+.preference-switch>span:first-child { min-width:0; }
+.preference-switch input { top:50%; transform:translateY(-50%); }
+.settings-panel { display:grid; gap:26px; }
+.settings-group h3 { margin:0 0 8px; color:var(--secondary); font-size:.75rem; font-weight:500; letter-spacing:.01em; }
+.settings-group .preference-switch { min-height:58px; }
+.settings-connection { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:15px 0; border-bottom:1px solid var(--line); }
+.settings-connection:last-child { border-bottom:0; padding-bottom:2px; }
+.settings-model { display:grid; gap:4px; min-width:0; }
+.settings-model-label { font-size:.84rem; font-weight:450; }
+.settings-model-name { color:var(--secondary); font-size:.76rem; overflow-wrap:anywhere; }
+.settings-connection .badge { flex-shrink:0; }
+.settings-connection-error { margin:12px 0 0; }
+.settings-progress-mode { margin:8px 0 0; padding:0; border:0; min-width:0; display:grid; grid-template-columns:1fr auto; align-items:center; gap:16px; }
+.settings-progress-mode legend { float:left; padding:0; font-size:.84rem; line-height:1.5; font-weight:450; }
+.settings-segments { display:flex; gap:3px; padding:3px; border-radius:14px; background:color-mix(in srgb,var(--secondary) 8%,transparent); }
+.settings-choice { position:relative; cursor:pointer; margin:0; }
+.settings-choice input { position:absolute; opacity:0; width:1px; height:1px; }
+.settings-choice>span { display:grid; place-items:center; min-width:72px; min-height:44px; padding:0 14px; border-radius:11px; color:var(--secondary); font-size:.82rem; transition:background 160ms ease,color 160ms ease,box-shadow 160ms ease; }
+.settings-choice input:checked+span { color:var(--text); background:var(--paper); box-shadow:0 1px 4px #00000010; }
+.settings-choice input:focus-visible+span { outline:2px solid var(--blue); outline-offset:2px; }
+.settings-choice:active>span { transform:scale(.97); }
+@media (prefers-reduced-motion:reduce) { .settings-choice>span { transition:none; } .settings-choice:active>span { transform:none; } }
+@media (forced-colors:active) { .settings-choice input:checked+span { outline:2px solid Highlight; } }
+@media(max-width:560px) { .settings-connection { gap:12px; } .settings-group .preference-switch { min-height:56px; } }

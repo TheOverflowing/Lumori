@@ -26,6 +26,6 @@ export function renderMultimodal(content, renderMedia) {
     const disabled = upcoming || !approved;
     const reason = upcoming ? '即将支持' : '文字审核后可用';
     const media = (content.media || []).filter(item => item.kind === format.kind);
-    return `<div class="multimodal-slot" data-format="${format.kind}"><div class="multimodal-slot-heading"><h3>${icon(format.icon)}${m(format.label)}</h3><button type="button" class="secondary media-generate" ${upcoming ? '' : `data-action="make-media" data-kind="${format.kind}"`} ${a(format.action, 'aria-label')} ${disabled ? `disabled ${a(reason, 'title')}` : ''}>${m(upcoming ? '即将支持' : '生成')}</button></div>${upcoming ? '' : renderMedia(media, true, content.version)}</div>`;
+    return `<div class="multimodal-slot" data-format="${format.kind}"><div class="multimodal-slot-heading"><h3>${icon(format.icon)}${m(format.label)}</h3><button type="button" class="secondary media-generate" ${upcoming ? '' : `data-action="make-media" data-kind="${format.kind}"`} ${a(format.action, 'aria-label')} ${disabled ? `disabled ${a(reason, 'title')}` : ''}>${m(upcoming ? '即将支持' : '生成')}</button></div>${renderMedia(media, true, content.version)}</div>`;
   }).join('')}</div></section>`;
 }

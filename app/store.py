@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS chunk_metadata(chunk_id TEXT PRIMARY KEY REFERENCES c
 CREATE TABLE IF NOT EXISTS document_chunking(document_id TEXT PRIMARY KEY REFERENCES documents(id),configuration TEXT NOT NULL,updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS document_parsing(document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,report TEXT NOT NULL,updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS document_visual_assets(document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,asset_id TEXT NOT NULL,metadata TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(document_id,asset_id));
+CREATE TABLE IF NOT EXISTS document_lifecycle(document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),deleted_at TEXT);
 CREATE TABLE IF NOT EXISTS document_options(document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE, options TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS figure_semantics(document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,asset_id TEXT NOT NULL,status TEXT NOT NULL,cache_key TEXT,description TEXT,vector TEXT,embedding_signature TEXT,error TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(document_id,asset_id));
 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,request_key TEXT UNIQUE NOT NULL,kind TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,result TEXT,error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
@@ -27,8 +28,15 @@ CREATE TABLE IF NOT EXISTS contents(id TEXT PRIMARY KEY,course_id TEXT NOT NULL 
 CREATE TABLE IF NOT EXISTS revisions(content_id TEXT NOT NULL,version INTEGER NOT NULL,asset TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(content_id,version));
 CREATE TABLE IF NOT EXISTS media(id TEXT PRIMARY KEY,content_id TEXT NOT NULL REFERENCES contents(id),version INTEGER NOT NULL,kind TEXT NOT NULL,path TEXT NOT NULL,mime TEXT NOT NULL,status TEXT NOT NULL,metadata TEXT NOT NULL,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS evaluations(id TEXT PRIMARY KEY,content_id TEXT NOT NULL,version INTEGER NOT NULL,metrics TEXT NOT NULL,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS current_evaluations(content_id TEXT NOT NULL REFERENCES contents(id),version INTEGER NOT NULL,evaluation_id TEXT NOT NULL REFERENCES evaluations(id),updated_at TEXT NOT NULL,PRIMARY KEY(content_id,version));
+CREATE TABLE IF NOT EXISTS evaluation_history(id TEXT PRIMARY KEY,evaluation_id TEXT NOT NULL REFERENCES evaluations(id),metrics TEXT NOT NULL,saved_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS calls(id TEXT PRIMARY KEY,job_id TEXT,capability TEXT NOT NULL,model TEXT NOT NULL,status TEXT NOT NULL,usage TEXT NOT NULL,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS job_evidence(job_id TEXT PRIMARY KEY REFERENCES jobs(id),evidence TEXT NOT NULL,updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS job_timelines(job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,timeline TEXT NOT NULL,updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS query_fusion_decisions(job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,request_sha256 TEXT NOT NULL,decision TEXT NOT NULL,updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS exploration_runs(job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,state TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS exploration_candidate_indexes(job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,candidate_sha256 TEXT NOT NULL,state TEXT NOT NULL,PRIMARY KEY(job_id,candidate_sha256));
+CREATE TABLE IF NOT EXISTS external_document_sources(document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,metadata TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_chunks_document ON chunks(document_id);
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,display_name TEXT NOT NULL,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS auth_sessions(token_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL);
@@ -39,6 +47,7 @@ CREATE TABLE IF NOT EXISTS course_owners(course_id TEXT PRIMARY KEY REFERENCES c
 CREATE INDEX IF NOT EXISTS ix_course_owners_user ON course_owners(user_id);
 CREATE TABLE IF NOT EXISTS job_owners(job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,user_id TEXT NOT NULL REFERENCES users(id));
 CREATE INDEX IF NOT EXISTS ix_job_owners_user ON job_owners(user_id);
+CREATE TABLE IF NOT EXISTS preparation_uses(preparation_id TEXT PRIMARY KEY REFERENCES jobs(id),job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id));
 '''
 
 class Conflict(Exception): pass
@@ -123,7 +132,7 @@ class Store:
             except (TypeError,ValueError):row['usage']={}
         return rows
 
-    def job(self, key, kind, payload, *, owner_id=None):
+    def job(self, key, kind, payload, *, owner_id=None, preparation_id=None):
         # Keep historical positional inserts valid and legacy rows unassigned.
         # User-controlled keys cannot collide across accounts or with legacy jobs.
         if owner_id is not None:
@@ -139,15 +148,24 @@ class Store:
                         raise Conflict('请求标识不可用，请使用新的请求标识。')
                 if old['kind']!=kind or old['payload']!=encoded: raise Conflict('重复请求标识对应不同参数')
                 return dict(old),False
+            if preparation_id and db.execute('SELECT 1 FROM preparation_uses WHERE preparation_id=?',(preparation_id,)).fetchone():
+                raise Conflict('此次理解检查已用于生成，请重新检查。')
             row=dict(id=uid(),request_key=key,kind=kind,payload=encoded,status='queued',result=None,error=None,created_at=now(),updated_at=now())
             db.execute('INSERT INTO jobs VALUES(:id,:request_key,:kind,:payload,:status,:result,:error,:created_at,:updated_at)',row)
             if owner_id is not None:
                 db.execute('INSERT INTO job_owners(job_id,user_id) VALUES(?,?)', (row['id'], owner_id))
+            if preparation_id:
+                db.execute('INSERT INTO preparation_uses(preparation_id,job_id) VALUES(?,?)',(preparation_id,row['id']))
             return row,True
 
     def reserve_call(self, job_id, capability, model, limit):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            agent=db.execute('''SELECT json_extract(evidence,'$.configuration.max_calls') AS cap
+                FROM job_evidence WHERE job_id=? AND json_extract(evidence,'$.schema_version')='education-agent-v1' ''',(job_id,)).fetchone()
+            if agent and type(agent['cap']) is int:
+                total=db.execute('SELECT count(*) FROM calls WHERE job_id=?',(job_id,)).fetchone()[0]
+                if total>=agent['cap']:raise ValueError('已达到本任务 API 调用上限；检索、失败请求及跨日续做均计入上限。')
             date=now()[:10]
             owner = db.execute('SELECT user_id FROM job_owners WHERE job_id=?', (job_id,)).fetchone()
             if owner:

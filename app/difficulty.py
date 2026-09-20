@@ -55,7 +55,7 @@ class AssessmentItem(BaseModel):
 
 class DifficultyAssessment(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    items: list[AssessmentItem] = Field(min_length=1, max_length=10)
+    items: list[AssessmentItem] = Field(min_length=1, max_length=50)
 
 
 def build_difficulty_plan(request):
@@ -118,7 +118,7 @@ def blind_assessment_contract(asset, sources, learner_profile):
     }
 
 
-def validate_assessment(raw, plan):
+def validate_assessment(raw, plan, *, allow_difficulty_mismatch=False):
     """Malformed assessments raise ValueError; valid failed checks are repairable."""
     assessment = DifficultyAssessment.model_validate(raw)
     ids = [item.slot_id for item in assessment.items]
@@ -129,7 +129,7 @@ def validate_assessment(raw, plan):
     failures = []
     for item in assessment.items:
         reasons = []
-        if item.assessed_difficulty != targets[item.slot_id]:
+        if not allow_difficulty_mismatch and item.assessed_difficulty != targets[item.slot_id]:
             reasons.append('difficulty_mismatch')
         if item.confidence == 'low':
             reasons.append('low_confidence')
@@ -145,3 +145,56 @@ def validate_assessment(raw, plan):
         raise AssetRuleError('题目未通过独立难度复核；请调整题目设计或补充资料后重试。',
                              'difficulty_assessment_failed', items=failures)
     return assessment
+
+
+DIFFICULTY_POLICY = {
+    'revision': 'difficulty-calibration-v1',
+    'strict_rounds': 3,
+    'relaxation_tiers': ['adjacent_level', 'any_level'],
+    'correctness_relaxed': False,
+    'note': 'After three bounded rounds, reuse the closest candidate whose other quality gates passed. '
+            'Requested labels remain authoring targets; assessed levels are reported separately. '
+            'Combined low-confidence quality judgments are never relaxed.',
+}
+
+
+def difficulty_acceptance(items, plan, *, rounds, accepted_attempt):
+    """Describe the actual model judgment without rewriting the requested plan."""
+    targets = {slot['slot_id']: slot['difficulty'] for slot in plan}
+    levels = {'easy': 0, 'medium': 1, 'hard': 2}
+    result = []
+    for raw in items:
+        item = raw.model_dump() if hasattr(raw, 'model_dump') else dict(raw)
+        target = targets[item['slot_id']]
+        distance = abs(levels[target] - levels[item['assessed_difficulty']])
+        result.append({k: item[k] for k in ('slot_id', 'assessed_difficulty', 'confidence')} | {
+            'target_difficulty': target, 'strict_passed': distance == 0,
+            'level_distance': distance})
+    distance = max((item['level_distance'] for item in result), default=0)
+    reason = 'target_matched' if not distance else 'adjacent_level' if distance == 1 else 'any_level'
+    return {'policy_revision': DIFFICULTY_POLICY['revision'],
+            'status': 'strict' if not distance else 'adjusted', 'strict_passed': distance == 0,
+            'rounds': rounds, 'accepted_attempt': accepted_attempt,
+            'acceptance_reason': reason, 'correctness_relaxed': False, 'items': result}
+
+
+def acceptance_rank(acceptance):
+    """Prefer the nearest assessed levels, then stronger joint quality confidence."""
+    items = acceptance['items']
+    return (max((item['level_distance'] for item in items), default=0),
+            sum(item['level_distance'] for item in items),
+            -sum({'low': 0, 'medium': 1, 'high': 2}[item['confidence']] for item in items),
+            -acceptance['accepted_attempt'])
+
+
+def combine_difficulty_acceptances(acceptances):
+    """Summarize per-question decisions while retaining their own round counts."""
+    adjusted = [item for item in acceptances if not item['strict_passed']]
+    return {'policy_revision': DIFFICULTY_POLICY['revision'],
+            'status': 'adjusted' if adjusted else 'strict', 'strict_passed': not adjusted,
+            'rounds': max((item['rounds'] for item in acceptances), default=0),
+            'acceptance_reason': ('any_level' if any(item['acceptance_reason'] == 'any_level'
+                for item in adjusted) else 'adjacent_level' if adjusted else 'target_matched'),
+            'correctness_relaxed': False,
+            'items': [entry | {'rounds': item['rounds'], 'accepted_attempt': item['accepted_attempt'],
+                'acceptance_reason': item['acceptance_reason']} for item in acceptances for entry in item['items']]}

@@ -72,6 +72,7 @@ html[data-theme="dark"] .file-icon { background: #303d33; }
 html[data-theme="dark"] .file-icon img { opacity: .75; }
 html[data-theme="dark"] button,
 html[data-theme="dark"] .button { background: #376fc7; color: #fff; }
+html[data-theme="dark"] .document-switch input:checked+.switch-track { background: #376fc7; }
 html[data-theme="dark"] button.secondary,
 html[data-theme="dark"] .button.secondary { background: #35433a; color: #dbe7de; border-color: rgb(216 238 224 / .1); box-shadow: 0 2px 5px rgb(0 0 0 / .06); }
 html[data-theme="dark"] button.link,
