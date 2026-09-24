@@ -52,14 +52,20 @@ def structured_wire(monkeypatch):
             requests = [deepcopy(item['request']) for item in compiled['evidence']['tool_results']]
             if control['solver_mutation']:
                 requests = control['solver_mutation'](requests)
-            return self.response({'answerable': True, 'ambiguity_free': True,
+            result = {'answerable': True, 'ambiguity_free': True,
                 'assessed_difficulty': control['level'], 'confidence': 'high',
                 'answer': 'UNTRUSTED_SOLVER_NUMBER_999', 'explanation': 'UNTRUSTED_SOLVER_PROSE',
-                'requires_calculation': True, 'tool_requests': requests})
+                'requires_calculation': True, 'tool_requests': requests}
+            if 'question_checks' in contract['schema']['properties']:
+                result['question_checks'] = {'condition_issues': [], 'option_checks': []}
+            return self.response(result)
         assert contract['task'] == 'agent_review'
-        return self.response({'answer_correct': True, 'explanation_correct': True, 'source_supported': True,
+        result = {'answer_correct': True, 'explanation_correct': True, 'source_supported': True,
             'ambiguity_free': True, 'tool_inputs_match_question': True, 'calculations_verified': True,
-            'distinct_from_previous': True, 'confidence': 'high', 'issues': [], 'feedback': 'Preset passing review.'})
+            'distinct_from_previous': True, 'confidence': 'high', 'issues': [], 'feedback': 'Preset passing review.'}
+        if 'question_checks' in contract['schema']['properties']:
+            result.update(question_checks={'condition_issues': [], 'option_checks': []}, explanation_issues=[])
+        return self.response(result)
 
     monkeypatch.setattr(AgentWire, '__call__', respond)
     return control

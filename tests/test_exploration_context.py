@@ -78,6 +78,52 @@ def test_broad_query_context_restores_distinct_subtopics_and_preserves_normal_hi
     validate_frozen_sources(pipeline, request, result)
 
 
+def test_frozen_missing_need_retrieves_indexed_sections_before_declaring_failure(rig):
+    pipeline, request, counter = rig
+    pages = [
+        'Machine learning uses experience from examples to improve a predictive task.',
+        'Supervised learning uses labeled examples to learn a mapping from inputs to outputs.',
+        'Unsupervised learning looks for patterns in data without provided labels.',
+        'Reinforcement learning trains an agent through actions and rewards from an environment.',
+    ]
+    leaves, item = seed(rig, pages)
+    support(item, leaves[0], 'definition')
+    selected, _ = runtime_context(leaves[:1], {'reference': pages}, counter, 1024, 'none', 1)
+    assert all('Unsupervised' not in source['text'] for source in selected)
+    missing = [{'id': 'categories', 'need': 'supervised unsupervised reinforcement learning types',
+                'covered': False, 'queries': [{'query': 'machine learning categories supervised unsupervised reinforcement',
+                                               'language': 'en'}]}]
+
+    result, audit = context.supplement_context(pipeline, request, selected, [item],
+                                                missing_requirements=missing)
+
+    joined = '\n'.join(source['text'] for source in result)
+    assert all(term in joined for term in ('Supervised', 'Unsupervised', 'Reinforcement'))
+    assert audit['reason'] == 'verified_gap_recheck'
+    assert audit['targeted_gap_ids'] == ['categories']
+    assert audit['targeted_included_leaf_count'] == 3
+    assert audit['source_tokens'] <= context.MAX_CONTEXT_TOKENS
+    validate_frozen_sources(pipeline, request, result)
+
+
+def test_frozen_gap_recheck_can_use_verified_document_without_selection_quotes(rig):
+    pipeline, request, counter = rig
+    pages = ['Machine learning learns from examples.',
+             'Unsupervised learning finds structure without labels.']
+    leaves, item = seed(rig, pages)
+    selected, _ = runtime_context(leaves[:1], {'reference': pages}, counter, 1024, 'none', 1)
+    missing = [{'id': 'categories', 'need': 'unsupervised learning without labels',
+                'covered': False, 'queries': []}]
+
+    result, audit = context.supplement_context(pipeline, request, selected, [item],
+                                                missing_requirements=missing)
+
+    assert 'Unsupervised' in '\n'.join(source['text'] for source in result)
+    assert audit['valid_anchors'] == 0
+    assert audit['targeted_included_leaf_count'] == 1
+    validate_frozen_sources(pipeline, request, result)
+
+
 def test_fabricated_quote_and_incorrect_coordinates_never_add_source_text(rig):
     pipeline, request, _ = rig
     leaves, item = seed(rig, ['This real source describes the exact original material.'])

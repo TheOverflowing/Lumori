@@ -17,6 +17,7 @@ from app.config import Settings, Endpoint
 from app.harness_runner import run_harness_phase, child_environment
 from app.providers import ApiProviders, ProviderError
 from app.store import Store
+from app.task_control import JobCancelled
 
 
 ENABLED = os.getenv('RUN_HARNESS_INTEGRATION') == '1'
@@ -60,6 +61,99 @@ def make_agent(tmp_path, wire, *, timeout=30):
         evidence={'sources': [{'id': 'chunk-1', 'document_id': 'alice-doc', 'page': 1,
                    'document_name': 'rr.md', 'text': 'Frozen RR evidence for this job.'}]})
     return agent
+
+
+@pytest.fixture
+def completed_phase_transport(monkeypatch):
+    """Replace subprocess/socket boundaries, retaining the real runner logic."""
+    from contextlib import asynccontextmanager
+    import app.harness_runner as runner
+    state = SimpleNamespace(agent=None, outcome='complete', prompts=0,
+                            value={'ok': True, 'fixture_result': 'already-returned'})
+    monkeypatch.setattr(runner, 'verify_runtime', lambda settings: None)
+    @asynccontextmanager
+    async def relay(*args, **kwargs):
+        kwargs['before_call']()
+        state.app = SimpleNamespace(state=SimpleNamespace(audit=[]))
+        yield 'http://127.0.0.1:12345/v1', state.app
+    monkeypatch.setattr(runner, 'serve_relay', relay)
+    class Client:
+        events = []
+        stderr_tail = b''
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def initialize(self): return {'fixture': True}
+        async def new_session(self, *args): return {'sessionId': 'fixture-session'}
+        async def prompt(self, *args):
+            state.prompts += 1
+            state.agent.store.request_cancel(state.agent.job_id)
+            if state.outcome == 'relay_cancelled':
+                state.app.state.audit.append({'status': 'cancelled', 'error_code': 'task_cancelled'})
+            else:
+                state.app.state.audit.append({'status': 'succeeded', 'response': completion(json.dumps(state.value))})
+            if state.outcome == 'scope_revoked':
+                state.agent.store.execute('INSERT INTO document_lifecycle VALUES(?,?,?)', ('alice-doc', 0, None))
+            return {'stopReason': 'end_turn' if state.outcome != 'incomplete' else 'cancelled'}
+    monkeypatch.setattr(runner, 'ACPClient', Client)
+    return state
+
+
+@pytest.mark.parametrize('outcome', ['complete', 'relay_cancelled', 'incomplete', 'scope_revoked'])
+def test_runner_preserves_only_complete_authorized_response_after_cancel(tmp_path, completed_phase_transport, outcome):
+    state = completed_phase_transport
+    def forbidden(request): pytest.fail('Fixture cannot make external provider calls')
+    state.agent = make_agent(tmp_path, forbidden)
+    state.outcome = outcome
+    report = {}
+    async def scenario():
+        try:
+            phase = run_harness_phase(state.agent, [
+                {'role': 'system', 'content': 'Return JSON.'},
+                {'role': 'user', 'content': '{"task":"agent_author"}'}], 'author', report)
+            if outcome == 'complete':
+                assert await phase == state.value
+            else:
+                with pytest.raises(JobCancelled): await phase
+        finally: await state.agent.pipeline.providers.close()
+    asyncio.run(scenario())
+    assert report['status'] == ('completed' if outcome == 'complete' else 'cancelled')
+    assert not state.agent.store.calls_for_job(state.agent.job_id)
+    assert state.agent.store.job_control(state.agent.job_id)['cancel_requested'] is True
+
+
+def test_agent_checkpoints_complete_harness_phase_before_stopping_and_reuses_on_resume(tmp_path, completed_phase_transport):
+    from app.generation_agent import GenerationAgent
+    from app.models import GenerateRequest
+    from app.pipeline import Pipeline
+    state = completed_phase_transport
+    def forbidden(request): pytest.fail('Fixture cannot make external provider calls')
+    base = make_agent(tmp_path, forbidden)
+    pipeline = Pipeline(base.settings, base.store, base.pipeline.providers, enforce_account_ownership=True)
+    request = GenerateRequest(course_id='alice-course', topic='A fixture learning objective', request_key='fixture-call')
+    agent = GenerationAgent(pipeline, request, base.job_id)
+    attempt = {'number': 1, 'status': 'pending'}
+    agent.state = {'status': 'running', 'resume_count': 0, 'call_count': 0, 'current_slot': 'q1',
+                   'slots': [{'slot_id': 'q1', 'status': 'pending', 'attempts': [attempt]}]}
+    agent.evidence = {'agent': agent.state, 'sources': base.evidence['sources'], 'configuration': {}}
+    state.agent = agent
+    async def scenario():
+        try:
+            with pytest.raises(JobCancelled):
+                await agent.call(attempt, 'author', {'task': 'agent_author'}, 'Return JSON.')
+            saved = json.loads(agent.store.one('SELECT evidence FROM job_evidence WHERE job_id=?', (agent.job_id,))['evidence'])
+            record = saved['agent']['slots'][0]['attempts'][0]['author']
+            assert record['response'] == state.value
+            assert record['history'][0]['status'] == record['history'][0]['harness']['status'] == 'completed'
+            assert saved['agent']['status'] == 'cancelled'
+            with agent.store.connect() as db:
+                db.execute('DELETE FROM job_controls WHERE job_id=?', (agent.job_id,))
+                db.execute("UPDATE jobs SET status='running' WHERE id=?", (agent.job_id,))
+            agent.state['status'] = 'running'
+            assert await agent.call(attempt, 'author', {'task': 'agent_author'}, 'Return JSON.') == state.value
+            assert state.prompts == 1
+        finally: await base.pipeline.providers.close()
+    asyncio.run(scenario())
 
 
 class TeachingWire:

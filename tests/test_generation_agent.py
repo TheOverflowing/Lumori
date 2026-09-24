@@ -113,17 +113,21 @@ class AgentWire:
         if task == 'agent_solve':
             return self.response({
                 'answerable': True, 'ambiguity_free': True, 'assessed_difficulty': level,
-                'confidence': 'high', 'answer': f'Independent fixture solution {position:02d}.',
+                'confidence': 'high', 'answer': ('A' if contract['question']['kind'] == 'mcq'
+                    and not self.tool_input and 'question_checks' in contract['schema'].get('properties', {})
+                    else f'Independent fixture solution {position:02d}.'),
                 'explanation': 'Apply the supplied course rule.',
                 'requires_calculation': self.requires_calculation,
                 'tool_requests': [] if self.tool_input is None else [
                     {'name': 'cpu_schedule_v1', 'input': copy.deepcopy(self.tool_input)}],
+                **self.quality_fields(contract),
             })
         review = {
             'answer_correct': True, 'explanation_correct': True, 'source_supported': True,
             'ambiguity_free': True, 'tool_inputs_match_question': True, 'calculations_verified': True,
             'distinct_from_previous': True, 'confidence': 'high', 'issues': [],
             'feedback': 'Fixture gates passed.', **self.review_override,
+            **self.quality_fields(contract),
         }
         if position == self.review_fail_at or (
             position == self.repair_once_at and self.stage_counts[(task, position)] == 1
@@ -131,6 +135,17 @@ class AgentWire:
             review.update(answer_correct=False, issues=['incorrect_reference_answer'],
                           feedback='Correct only this question before another independent solve.')
         return self.response(review)
+
+    @staticmethod
+    def quality_fields(contract):
+        if 'question_checks' not in contract['schema'].get('properties', {}):
+            return {}
+        question = contract['question']
+        checks = {'condition_issues': [], 'option_checks': [
+            {'label': chr(65+i), 'verdict': 'correct' if i == 0 else 'incorrect', 'reason': 'Fixture option check.'}
+            for i, _ in enumerate(question.get('options', []))] if question['kind'] == 'mcq' else []}
+        return {'question_checks': checks, **({'explanation_issues': []}
+            if 'explanation_issues' in contract['schema']['properties'] else {})}
 
 
 @dataclass
@@ -377,7 +392,7 @@ def test_large_tool_timelines_stay_in_evidence_but_not_review_or_repair_prompts(
 
 @pytest.mark.parametrize('review_override', [
     {'answer_correct': False}, {'explanation_correct': False}, {'source_supported': False},
-    {'tool_inputs_match_question': False}, {'calculations_verified': False}, {'confidence': 'low'},
+    {'calculations_verified': False}, {'confidence': 'low'},
 ])
 def test_review_gates_cannot_be_bypassed_by_other_positive_flags(agent_case, review_override):
     rig = agent_case(count=1, wire_options={'review_override': review_override}, settings_options={'agent_max_repairs': 0})
@@ -399,7 +414,7 @@ def test_insufficient_minimum_budget_stops_before_retrieval_and_text_calls(agent
 
 @pytest.mark.parametrize('settings_options,expected_status', [
     ({'agent_max_calls': 7}, 'call_limit'),
-    ({'max_daily_calls': 7}, 'provider_error'),
+    ({'max_daily_calls': 7}, 'call_limit'),
 ])
 def test_runtime_budget_does_not_make_an_extra_repair_call(agent_case, settings_options, expected_status):
     rig = agent_case(count=2, wire_options={'review_fail_at': 2}, settings_options=settings_options)

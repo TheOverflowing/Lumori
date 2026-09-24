@@ -80,3 +80,40 @@
 .document-paper .question-options p { font-size:inherit; line-height:inherit; }
 .answer-key { font-weight:550; margin-bottom:.65em; }
 .answer .material-statements { font-size:.8rem; line-height:1.95; }
+
+.question-edit-action { display:flex; justify-content:flex-end; margin:-8px 0 5px; }
+.question-edit-action button.link { min-height:44px; padding:8px 0 8px 14px; color:var(--secondary); font-size:.72rem; }
+.question-revision-context { margin:0 0 18px; color:var(--secondary); font-size:.78rem; font-variant-numeric:tabular-nums; }
+.question-revision-modes { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.question-revision-modes label { display:flex; align-items:center; justify-content:center; margin:0; min-height:48px; padding:10px; border:1px solid var(--field-border); border-radius:12px; background:var(--field-fill); font-size:.8rem; cursor:pointer; }
+.question-revision-modes input { position:absolute; width:1px; height:1px; opacity:0; }
+.question-revision-modes label:has(input:checked) { border-color:var(--field-focus-border); background:var(--field-focus-fill); }
+.question-revision-modes label:has(input:focus-visible) { outline:2px solid var(--blue); outline-offset:3px; }
+.question-revision-form textarea { min-height:126px; }
+.question-revision-form [hidden] { display:none; }
+.question-revision-form .modal-actions button { min-height:44px; }
+.question-comparison { margin:0 0 24px; padding-bottom:16px; border-bottom:1px solid var(--line); }
+.question-comparison>summary { min-height:44px; color:var(--text); font-size:.8rem; }
+.question-comparison>summary>span { margin-left:8px; color:var(--secondary); font-size:.72rem; }
+.question-comparison-body { padding:12px 0 8px; }
+.question-change-request { white-space:pre-wrap; overflow-wrap:anywhere; }
+.question-change { margin-top:22px; }
+.question-change h4 { font-size:.78rem; margin:0 0 10px; }
+.question-change-columns { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:20px; }
+.question-change-columns>div { min-width:0; }
+.question-change-label { display:block; color:var(--secondary); font-size:.68rem; margin-bottom:8px; }
+.question-change-columns .readable-text, .document-paper .question-change-columns p { font-size:.78rem; line-height:1.8; }
+.question-change-columns ol { margin:0; padding-left:24px; }
+.question-change-answers { margin-top:18px; }
+.partial-content-heading { margin:0 0 28px; }
+.partial-content-heading h1 { font-size:1.45rem; margin:0 0 12px; }
+.partial-content-heading p { color:var(--secondary); font-size:.8rem; }
+.partial-content { max-width:900px; }
+.partial-sources { margin-top:28px; padding-top:14px; border-top:1px solid var(--line); }
+@media (hover:hover) and (pointer:fine) {
+  .question-edit-action button.link:hover { color:var(--blue); }
+  .question-revision-modes label:hover { border-color:var(--field-focus-border); }
+}
+@media (max-width:600px) {
+  .question-change-columns { grid-template-columns:1fr; gap:14px; }
+}

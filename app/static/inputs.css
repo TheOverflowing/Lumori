@@ -142,7 +142,8 @@ textarea[data-autosize] {
   max-height: 320px;
   resize: none;
   overflow-y: auto;
-  overscroll-behavior-y: contain;
+  /* Reaching a field's edge must hand scrolling back to the page. */
+  overscroll-behavior-y: auto;
 }
 .writing-field textarea[data-autosize] {
   min-height: 152px;

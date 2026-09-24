@@ -121,6 +121,29 @@ def test_owner_is_rechecked_after_server_creation(scoped):
     assert core.cpu_schedule_v1(cpu_input())['error']['code'] == 'scope_denied'
 
 
+@pytest.mark.parametrize('tool', ['get_reference_chunks', 'cpu_schedule_v1'])
+def test_cancelled_task_blocks_new_tools_and_preserves_denial_audit(scoped, monkeypatch, tool):
+    import app.harness_tools as tools
+    store, manifest, _ = scoped
+    core = ScopedTeachingTools(manifest)
+    store.request_cancel(manifest['job_id'])
+    def forbidden(*args): pytest.fail('Cancelled work must not execute a calculation')
+    monkeypatch.setattr(tools, 'run_answer_tool', forbidden)
+    result = getattr(core, tool)(*([cpu_input()] if tool == 'cpu_schedule_v1' else []))
+    assert result['ok'] is False and result['error']['code'] == 'task_cancelled'
+    assert 'Frozen RR' not in json.dumps(result)
+    assert read_audit(manifest)[-1]['result'] == result
+
+
+def test_revision_tools_keep_same_course_and_document_boundary(scoped):
+    store, manifest, _ = scoped
+    store.execute("UPDATE jobs SET kind='revise_question' WHERE id=?", (manifest['job_id'],))
+    core = ScopedTeachingTools(manifest)
+    assert core.get_reference_chunks()['ok'] is True
+    store.execute('INSERT INTO document_lifecycle VALUES(?,?,?)', ('alice-document', 0, None))
+    assert core.get_reference_chunks()['error']['code'] == 'scope_denied'
+
+
 def test_research_ownerless_requires_matching_ownerless_course(scoped):
     store, manifest, _ = scoped
     manifest.update(enforce_account_ownership=False, owner_id=None)

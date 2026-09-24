@@ -10,7 +10,7 @@ def configuration(settings):
     from .exploration_sources import CATALOG_VERSION, DNS_POLICY_VERSION
     from .exploration_staging import configuration as staging_configuration
     provider = settings.exploration_search_provider
-    if provider not in ('curated', 'brave'):
+    if provider not in ('curated', 'hybrid', 'brave'):
         raise ValueError('自动探索的搜索服务配置无效。')
     if settings.exploration_dns_mode not in ('auto', 'system'):
         raise ValueError('自动探索的域名解析配置无效。')
@@ -45,7 +45,7 @@ def capabilities(settings):
         return dict(available=False, provider='unavailable', web_search_configured=False)
     web = policy['provider'] == 'brave' and bool(settings.exploration_search_api_key)
     return policy | dict(available=bool(settings.exploration_enabled and
-        (policy['provider'] == 'curated' or web)), web_search_configured=web)
+        (policy['provider'] in ('curated', 'hybrid') or web)), web_search_configured=web)
 
 
 def require_available(settings):

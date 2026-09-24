@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 import time
 from itertools import count
 from pathlib import Path
@@ -24,6 +25,7 @@ from .rag_runtime import (encoding_configuration, document_input, tokenizer_iden
 from .store import uid, now, dumps
 from .document_lifecycle import ACTIVE_SQL, state as document_state
 from . import job_progress
+from .task_control import JobCancelled
 
 PROMPT_VERSION='education-v3'
 
@@ -105,11 +107,17 @@ class Pipeline:
     def __init__(self,settings,store,providers,*,enforce_account_ownership=False):
         self.settings=settings;self.store=store;self.providers=providers
         self.enforce_account_ownership=enforce_account_ownership
+        self.store.max_pending_jobs_per_account=max(1,settings.max_pending_jobs_per_account)
         self.queue=asyncio.Queue();self.workers=[]
+        self.worker_failures=0
+        self.active_jobs=set()
+        self.unsettled_jobs=set()
+        self.stopping=False
         self.index_locks={}
         self.document_worker_slot=asyncio.Semaphore(1)
 
     async def start(self):
+        self.stopping=False
         # Unassigned legacy work stays untouched until locally restored.
         owned = ' AND id IN (SELECT job_id FROM job_owners)' if self.enforce_account_ownership else ''
         self.store.execute("UPDATE jobs SET status='failed',error=?,updated_at=? WHERE kind='prepare' AND status='queued'"+owned,
@@ -120,11 +128,16 @@ class Pipeline:
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             interrupted_jobs = db.execute("SELECT id FROM jobs WHERE status='running'"+owned).fetchall()
+            db.execute("""UPDATE jobs SET status='cancelled',error=NULL,updated_at=?
+                WHERE status IN ('queued','running') AND id IN
+                (SELECT job_id FROM job_controls WHERE cancel_requested_at IS NOT NULL)"""+owned, (now(),))
             db.execute("UPDATE jobs SET status='failed',error=?,updated_at=? WHERE status='running'"+owned,
                        ('程序曾中断；如有需要请新建任务重试。',now()))
         from .exploration_staging import retire_stages
         for interrupted_job in interrupted_jobs:
             retire_stages(self.store, interrupted_job['id'])
+        for cancelled in self.store.all("SELECT id FROM jobs WHERE status='cancelled'"+owned):
+            job_progress.finish(self.store,cancelled['id'],'cancelled')
         for interrupted in self.store.all('''SELECT j.id FROM jobs j JOIN job_timelines t ON t.job_id=j.id
                 WHERE j.status='failed' AND CASE WHEN json_valid(t.timeline)
                     THEN json_extract(t.timeline,'$.activity') IS NOT NULL ELSE 0 END'''+owned):
@@ -136,17 +149,91 @@ class Pipeline:
         self.workers=[asyncio.create_task(self.worker()) for _ in range(self.settings.workers)]
 
     async def stop(self):
+        self.stopping=True
         for worker in self.workers:worker.cancel()
         await asyncio.gather(*self.workers,return_exceptions=True)
         await self.providers.close()
 
     def enqueue(self,job_id):self.queue.put_nowait(job_id)
 
+    def request_cancel(self,job_id):
+        result=self.store.request_cancel(job_id)
+        if result and result['status']=='cancelled':
+            self._finish_cancelled(job_id)
+        return result
+
+    def _finish_cancelled(self,job_id):
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute('SELECT evidence FROM job_evidence WHERE job_id=?',(job_id,)).fetchone()
+            if row:
+                evidence=json.loads(row['evidence'])
+                if isinstance(evidence.get('agent'),dict) and evidence['agent'].get('status')!='completed':
+                    evidence['agent']['status']='cancelled'
+                    db.execute('UPDATE job_evidence SET evidence=?,updated_at=? WHERE job_id=?',(dumps(evidence),now(),job_id))
+            db.execute("UPDATE jobs SET status='cancelled',error=NULL,updated_at=? WHERE id=?",(now(),job_id))
+        job_progress.finish(self.store,job_id,'cancelled')
+
+    def readiness(self):
+        try:
+            database=self.store.one('SELECT 1 AS ok')['ok']==1
+        except Exception:
+            database=False
+        live=sum(not worker.done() for worker in self.workers)
+        expected=self.settings.workers
+        ready=database and not self.stopping and expected>0 and live==expected
+        return {'ready':ready,'database':database,
+                'workers':{'expected':expected,'alive':live,'active':len(self.active_jobs),
+                           'queued':self.queue.qsize(),'recovered_errors':self.worker_failures}}
+
+    def _recover_worker_job(self,job_id):
+        """Reconcile a task whose consumer hit an unexpected storage error.
+
+        If storage is still unavailable this raises, keeping the queue item for
+        another attempt. A previously claimed job must never be silently dropped
+        merely because a subsequent queued-to-running update matches zero rows.
+        """
+        row=self.store.one('SELECT status FROM jobs WHERE id=?',(job_id,))
+        if row and row['status']=='queued':return 'retry'
+        if row and row['status']=='running':
+            if self.store.job_control(job_id)['cancel_requested']:
+                self._finish_cancelled(job_id)
+            else:
+                self.store.execute("UPDATE jobs SET status='failed',error=?,updated_at=? WHERE id=? AND status='running'",
+                    ('后台任务暂时中断，已保存进度；请稍后继续。',now(),job_id))
+                job_progress.finish(self.store,job_id,'failed')
+        return 'settled'
+
     async def worker(self):
         while True:
             job_id=await self.queue.get()
-            try:await self.run(job_id)
-            finally:self.queue.task_done()
+            self.active_jobs.add(job_id)
+            try:
+                if job_id in self.unsettled_jobs:
+                    recovery=self._recover_worker_job(job_id)
+                    self.unsettled_jobs.discard(job_id)
+                    if recovery=='settled':continue
+                await self.run(job_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # A claim/read/write failure must not silently kill a consumer.
+                # Log only the class: DB/provider messages can contain inputs.
+                self.worker_failures+=1
+                logging.getLogger(__name__).warning('Task worker recovered from %s',type(exc).__name__)
+                try:
+                    recovery=self._recover_worker_job(job_id)
+                    self.unsettled_jobs.discard(job_id)
+                    if recovery=='retry':
+                        self.queue.put_nowait(job_id)
+                except Exception:
+                    # Keep the queue item durable/retriable during a DB outage.
+                    self.unsettled_jobs.add(job_id)
+                    self.queue.put_nowait(job_id)
+                await asyncio.sleep(0.25)
+            finally:
+                self.active_jobs.discard(job_id)
+                self.queue.task_done()
 
     async def run(self,job_id):
         changed=self.store.execute("UPDATE jobs SET status='running',updated_at=? WHERE id=? AND status='queued'",(now(),job_id))
@@ -157,6 +244,7 @@ class Pipeline:
             payload=json.loads(job['payload'])
             self.authorize_job(job,payload)
             authorized=True
+            self.store.check_cancelled(job_id)
             if job['kind']=='index':result=await self.index(payload['document_id'],job_id)
             elif job['kind']=='parse':
                 from .document_jobs import parse_document
@@ -165,15 +253,24 @@ class Pipeline:
                 from .document_jobs import enrich
                 result=await enrich(self,payload,job_id)
             elif job['kind']=='generate':result=await self.generate(GenerateRequest(**payload),job_id)
+            elif job['kind']=='revise_question':
+                from .question_revision import execute_revision
+                result=await execute_revision(self,payload,job_id)
             elif job['kind']=='media':result=await self.media(payload,job_id)
             else:raise ValueError('未知任务类型。')
             status='insufficient_evidence' if result.get('insufficient_evidence') else 'succeeded'
             self.store.execute('UPDATE jobs SET status=?,result=?,updated_at=? WHERE id=?',(status,dumps(result),now(),job_id))
             job_progress.finish(self.store,job_id,status)
+        except JobCancelled:
+            if authorized and job['kind']=='parse':self.store.execute("UPDATE documents SET status='parse_failed' WHERE id=? AND status='pending'",(payload.get('document_id'),))
+            self._finish_cancelled(job_id)
         except asyncio.CancelledError:
             if authorized and job['kind']=='parse':self.store.execute("UPDATE documents SET status='parse_failed' WHERE id=? AND status='pending'",(json.loads(job['payload']).get('document_id'),))
-            self.store.execute("UPDATE jobs SET status='failed',error=?,updated_at=? WHERE id=?",('任务随服务停止而中断，请重试。',now(),job_id))
-            job_progress.finish(self.store,job_id,'failed',interruption='service_stop')
+            if self.store.job_control(job_id)['cancel_requested']:
+                self._finish_cancelled(job_id)
+            else:
+                self.store.execute("UPDATE jobs SET status='failed',error=?,updated_at=? WHERE id=?",('任务随服务停止而中断，请重试。',now(),job_id))
+                job_progress.finish(self.store,job_id,'failed',interruption='service_stop')
             raise
         except Exception as exc:
             if authorized and job['kind']=='parse':self.store.execute("UPDATE documents SET status='parse_failed' WHERE id=? AND status='pending'",(json.loads(job['payload']).get('document_id'),))
@@ -194,7 +291,7 @@ class Pipeline:
         if job['kind'] in ('index','parse','figures') and document_state(self.store,payload.get('document_id'))['deleted_at']:
             raise ValueError('资料已移到最近删除，请先恢复。')
         course_id=None
-        if job['kind']=='generate':course_id=payload.get('course_id')
+        if job['kind'] in ('generate','revise_question'):course_id=payload.get('course_id')
         elif job['kind'] in ('index','parse','figures'):
             row=self.store.one('SELECT course_id FROM documents WHERE id=?',(payload.get('document_id'),))
             course_id=row['course_id'] if row else None
@@ -227,6 +324,7 @@ class Pipeline:
         return base if encoding=='raw_text_v1' else hashlib.sha256(dumps([base,encoding]).encode()).hexdigest()[:20]
 
     async def _index_document(self,document_id,job_id):
+        self.store.check_cancelled(job_id)
         configuration=self.chunking_configuration()
         embedding_signature=self.embedding_signature()
         document=self.store.one('SELECT * FROM documents WHERE id=?',(document_id,))
@@ -265,6 +363,7 @@ class Pipeline:
             except (TypeError,ValueError,OverflowError):pass
         vectors=[]
         for start in range(0,len(rows),16):
+            self.store.check_cancelled(job_id)
             if self.embedding_signature()!=embedding_signature:
                 raise ValueError('索引期间嵌入配置发生变化，原索引仍被保留，请重试。')
             vectors.extend(await self.providers.embed([document_input(r,document['name'],self.settings.retrieval_document_encoding)
@@ -275,6 +374,7 @@ class Pipeline:
             matrix=normalize_vectors(vectors)
             if len(matrix)!=len(rows):raise ValueError()
         except (TypeError,ValueError,OverflowError):raise ProviderError('索引向量数量、数值或不同批次的维度不一致。') from None
+        self.store.check_cancelled(job_id)
         with self.store.connect() as db:
             # Replace only after every batch succeeded. Existing content citations are snapshots.
             db.execute('BEGIN IMMEDIATE')
@@ -307,6 +407,7 @@ class Pipeline:
         return result
 
     async def retrieve(self,request,job_id,*,with_trace=False):
+        self.store.check_cancelled(job_id)
         if not request.auto_explore:
             return await self._retrieve_local(request,job_id,with_trace=with_trace)
         from .auto_exploration import retrieve
@@ -472,8 +573,10 @@ class Pipeline:
         return (selected,trace) if with_trace else selected
 
     async def generate(self,request,job_id):
+        self.store.check_cancelled(job_id)
         agent=self.settings.generation_workflow=='agent_v1' and request.material!='lesson'
-        planner=agent and self.settings.agent_orchestration in ('supervisor_v1','supervisor_v2')
+        from .generation_agent import orchestration_for_request
+        planner=agent and orchestration_for_request(self.settings, request) in ('supervisor_v1','supervisor_v2')
         job_progress.begin(self.store,job_id,[*(['exploration'] if request.auto_explore else []),
                            'retrieval',*(['planning'] if planner else []),'writing','saving'],
                            total=request.count if agent else None)
@@ -740,6 +843,7 @@ class Pipeline:
             return {'insufficient_evidence':True,'message':asset.evidence_note or '检索资料不足以支持该请求。'}
         job_progress.update(self.store,job_id,'writing',complete=True)
         job_progress.update(self.store,job_id,'saving',activity='saving')
+        self.store.check_cancelled(job_id)
         content_id=uid()
         with self.store.connect() as db:
             db.execute('INSERT INTO contents VALUES(?,?,?,?,?,?,?,?,?)',
@@ -786,6 +890,7 @@ class Pipeline:
         self.store.save_job_evidence(job_id,evidence)
 
     async def media(self,payload,job_id):
+        self.store.check_cancelled(job_id)
         kind=payload['kind']
         job_progress.begin(self.store,job_id,[kind,'saving'])
         job_progress.update(self.store,job_id,kind,activity='generating_'+kind)
@@ -807,6 +912,7 @@ class Pipeline:
             metadata.update(prompt=prompt,model=self.settings.image.model)
         job_progress.update(self.store,job_id,kind,complete=True)
         job_progress.update(self.store,job_id,'saving',activity='saving')
+        self.store.check_cancelled(job_id)
         mid=uid();directory=self.settings.data_dir/'media';directory.mkdir(exist_ok=True)
         path=directory/(mid+ext);path.write_bytes(data)
         self.store.execute('INSERT INTO media VALUES(?,?,?,?,?,?,?,?,?)',

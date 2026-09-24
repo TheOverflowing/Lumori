@@ -8,6 +8,8 @@ import httpx
 import pytest
 
 from app import exploration_sources as sources
+from app.config import Settings
+from app.exploration_policy import capabilities
 
 
 def settings(**values):
@@ -19,6 +21,13 @@ def settings(**values):
 
 def run(awaitable):
     return asyncio.run(awaitable)
+
+
+def test_default_broad_search_is_available_without_a_paid_search_key():
+    settings = Settings()
+    assert settings.exploration_search_provider == 'hybrid'
+    assert capabilities(settings)['available'] is True
+    assert capabilities(settings)['web_search_configured'] is False
 
 
 class Writer:
@@ -141,6 +150,32 @@ def test_machine_learning_queries_find_primary_sources_without_os_false_positive
     assert any(row['language'] == language for row in rows)
 
 
+@pytest.mark.parametrize('query,language', [
+    ('Could you give me questions about "L\'Hôpital\'s rule"?', 'en'),
+    ('Explain L’Hopital’s rule conditions and examples', 'en'),
+    ('What is l hospital rule?', 'en'),
+    ('洛必达法则的适用条件和例题', 'zh'),
+])
+def test_calculus_queries_find_reviewed_source_across_spelling_variants(query, language):
+    rows = run(sources.search(settings(), query, language=language))
+    assert rows and rows[0]['title'] == "Mathematics LibreTexts: L'Hôpital's Rule"
+    assert rows[0]['storage_policy'] == 'open_license'
+    assert rows[0]['license'] == 'CC BY 4.0'
+    assert rows[0]['provider'] == 'curated'
+
+
+def test_calculus_license_is_exact_page_scoped_and_not_a_hospital_false_positive(monkeypatch):
+    assert run(sources.search(settings(), 'hospital management')) == []
+    url = next(item['url'] for item in sources.CATALOG
+               if item['title'] == "Mathematics LibreTexts: L'Hôpital's Rule")
+    assert sources.source_metadata(url)['license'] == 'CC BY 4.0'
+    assert sources.source_metadata(url + '?revision=unreviewed')['storage_policy'] == 'unknown'
+    wire(monkeypatch, [response(b'<html><body>L\'Hopital rule worked example</body></html>', 'text/html')])
+    fetched = run(sources.fetch_source(settings(), url))
+    assert fetched['storage_policy'] == 'open_license'
+    assert fetched['license_verification'] == 'catalog_reviewed'
+
+
 def test_primary_machine_learning_license_metadata_is_exact_page_scoped():
     google_zh = 'https://developers.google.com/machine-learning/intro-to-ml/what-is-ml?hl=zh-cn'
     assert sources.source_metadata(google_zh)['language'] == 'zh'
@@ -194,6 +229,68 @@ def mock_brave(monkeypatch, responder):
 
     monkeypatch.setattr(sources.httpx, 'AsyncClient', client)
     return options
+
+
+def test_hybrid_adds_bounded_public_articles_without_search_key(monkeypatch):
+    requests = []
+
+    def reply(request):
+        requests.append(request)
+        return httpx.Response(200, json={'query': {'search': [
+            {'ns': 0, 'pageid': 42, 'title': 'Quantum entanglement', 'snippet': '<b>Quantum</b> topic'},
+            {'ns': 14, 'pageid': 7, 'title': 'Category:Physics', 'snippet': 'not an article'},
+            {'ns': 0, 'pageid': 8, 'title': 'Quantum (disambiguation)', 'snippet': 'not evidence'},
+        ]}})
+
+    options = mock_brave(monkeypatch, reply)
+    rows = run(sources.search(settings(exploration_search_provider='hybrid'),
+                              'quantum entanglement', language='en', limit=3))
+    assert [row['url'] for row in rows] == ['https://en.wikipedia.org/wiki/Quantum_entanglement']
+    assert rows[0]['provider'] == 'wikipedia' and rows[0]['storage_policy'] == 'unknown'
+    assert rows[0]['snippet'] == 'Quantum topic'
+    assert str(requests[0].url).startswith(sources.WIKIMEDIA_ENDPOINTS['en'] + '?')
+    assert requests[0].url.params['srnamespace'] == '0'
+    assert requests[0].headers['User-Agent'].startswith('LumoriFYP/')
+    assert options[0]['follow_redirects'] is False and options[0]['trust_env'] is False
+
+
+def test_hybrid_preserves_catalog_priority_and_chinese_search(monkeypatch):
+    requests = []
+
+    def reply(request):
+        requests.append(request)
+        return httpx.Response(200, json={'query': {'search': [
+            {'ns': 0, 'pageid': 9, 'title': '机器学习', 'snippet': '百科文章'},
+        ]}})
+
+    mock_brave(monkeypatch, reply)
+    rows = run(sources.search(settings(exploration_search_provider='hybrid'),
+                              '机器学习的定义', language='zh', limit=8))
+    assert rows[0]['provider'] == 'curated'
+    assert any(row['url'] == 'https://zh.wikipedia.org/wiki/%E6%9C%BA%E5%99%A8%E5%AD%A6%E4%B9%A0'
+               for row in rows)
+    assert str(requests[0].url).startswith(sources.WIKIMEDIA_ENDPOINTS['zh'] + '?')
+
+
+def test_hybrid_uses_catalog_when_public_search_fails_and_reports_total_outage(monkeypatch):
+    mock_brave(monkeypatch, lambda request: httpx.Response(503, text='temporarily unavailable'))
+    rows = run(sources.search(settings(exploration_search_provider='hybrid'), 'machine learning'))
+    assert rows and all(row['provider'] == 'curated' for row in rows)
+    with pytest.raises(sources.SearchUnavailable):
+        run(sources.search(settings(exploration_search_provider='hybrid'), 'quantum entanglement'))
+
+
+def test_public_article_still_requires_license_at_download(monkeypatch):
+    article = 'https://en.wikipedia.org/wiki/Quantum_entanglement'
+    assert sources.source_metadata(article)['storage_policy'] == 'unknown'
+    body = (b'<html><head><title>Quantum entanglement</title>'
+            b'<link rel="license" href="https://creativecommons.org/licenses/by-sa/4.0/">'
+            b'</head><body><main>Public article text.</main></body></html>')
+    wire(monkeypatch, [response(body, 'text/html')])
+    fetched = run(sources.fetch_source(settings(), article))
+    assert fetched['storage_policy'] == 'open_license'
+    assert fetched['license'] == 'CC BY-SA 4.0'
+    assert fetched['license_verification'] == 'publisher_declared'
 
 
 def test_brave_uses_fixed_endpoint_safe_parse_and_no_redirects(monkeypatch):

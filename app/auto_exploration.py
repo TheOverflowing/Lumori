@@ -40,6 +40,7 @@ FAILURE_MESSAGES = {
     'no_candidates': '本次未找到可用且允许保存的参考资料。请补充资料或调整主题。',
     'no_search_results': '本次搜索未返回候选资料。请调整主题或补充参考资料后重试。',
     'no_search_results_curated': '当前公开课程目录中没有匹配的候选资料。目录覆盖有限，并不代表网上没有相关资料；请补充参考资料或配置全网搜索。',
+    'no_search_results_hybrid': '公开课程目录与百科搜索均未找到候选资料；这并不代表网上没有相关资料。请调整主题、补充资料，或配置全网搜索。',
     'no_usable_sources': '本次找到了候选资料，但未能取得可保存且足以支持要求的正文。请补充参考资料或调整范围后重试。',
     'search_unavailable': '资料搜索暂时不可用，请稍后重试或自行上传参考资料。',
     'model_budget': '自动探索已达到本次调用上限，资料仍不充分。请缩小范围或补充资料。',
@@ -169,8 +170,10 @@ def configuration(settings):
 def failure_message(trace):
     discovery = trace.get('exploration', {})
     reason = discovery.get('reason')
-    if reason == 'no_search_results' and discovery.get('configuration', {}).get('provider') == 'curated':
-        return FAILURE_MESSAGES['no_search_results_curated']
+    if reason == 'no_search_results':
+        provider = discovery.get('configuration', {}).get('provider')
+        if provider in ('curated', 'hybrid'):
+            return FAILURE_MESSAGES['no_search_results_' + provider]
     rejected = discovery.get('rejected', [])
     if reason == 'no_usable_sources' and rejected and all(
         item.get('reason') == 'source_unavailable' and item.get('error_code') in
@@ -557,7 +560,7 @@ class _Run:
             'supports': selection['supports'], 'verification': 'ai_selected_not_human_verified'}
 
 
-async def _parsed(pipeline, fetched, candidate):
+async def _parsed(pipeline, fetched, candidate, gaps=None):
     content_type = fetched['content_type'].split(';')[0].lower(); raw = fetched['raw']
     title = str(candidate.get('title') or 'Discovered reference')[:150]
     title = re.sub(r'[\x00-\x1f/\\]', ' ', title).strip() or 'Discovered reference'
@@ -568,7 +571,20 @@ async def _parsed(pipeline, fetched, candidate):
         async with pipeline.document_worker_slot:
             return await document_backends.parse(settings, title + '.pdf', raw, 'standard')
     if content_type in {'text/html', 'application/xhtml+xml'}:
-        return parse_web_html(raw, name=title + '.html')
+        parsed = parse_web_html(raw, name=title + '.html')
+        if candidate.get('provider') == 'wikipedia' and len(parsed.pages[0].text) > MAX_BODY_CHARS:
+            # Long encyclopedia pages exceed the bounded chunk budget. Keep
+            # literal passages selected against the frozen missing requirements;
+            # the original downloaded bytes and this extraction warning remain
+            # in provenance, so omitted sections are never silently cited.
+            page = parsed.pages[0]
+            page.text = _body_excerpt(page.text, gaps or [])
+            page.method = parsed.strategy = 'visible_html_relevance_excerpt_v1'
+            page.status = 'needs_review'
+            page.warnings.append('web_relevance_excerpt_v1')
+            parsed.warnings.append('web_relevance_excerpt_v1')
+            parsed.tools['web_text'] = 'visible_html_relevance_excerpt_v1'
+        return parsed
     elif content_type in {'text/plain', 'text/markdown'}:
         text = raw.decode('utf-8-sig', errors='strict')
         suffix = '.md' if fetched.get('source_format') == 'markdown_source' or content_type == 'text/markdown' else '.txt'
@@ -663,7 +679,7 @@ async def retrieve(pipeline, request, job_id, local_retrieve):
                 if fetched.get('storage_policy') != 'open_license':
                     run.reject(candidate, 'storage_not_permitted'); continue
                 try:
-                    parsed = await run.operation('parsing_source', lambda: _parsed(pipeline, fetched, candidate))
+                    parsed = await run.operation('parsing_source', lambda: _parsed(pipeline, fetched, candidate, gaps))
                 except ValueError:
                     run.reject(candidate, 'parse_failed'); continue
                 if len(parsed.pages) > getattr(pipeline.settings, 'exploration_max_source_pages', 20):
@@ -736,6 +752,24 @@ async def retrieve(pipeline, request, job_id, local_retrieve):
             assessment = await run.assess(selected)
             if assessment['status'] == 'sufficient': return run.finish(selected, trace, 'sources_sufficient')
             if assessment['status'] == 'needs_user_input': return run.finish([], trace, 'needs_user_input')
+            # A source can be indexed and still miss the final context when the
+            # broad topic ranks its introductory paragraphs above a required
+            # subtopic. Before searching the web again, inspect verified chunks
+            # from accepted originals for the *same frozen* uncovered needs.
+            if state['model_calls'] < run.options['max_model_calls']:
+                missing = [item for item in assessment['requirements'] if not item['covered']]
+                expanded, gap_audit = supplement_context(pipeline, request, selected, state['accepted'],
+                    missing_requirements=missing)
+                trace['gap_context'] = gap_audit
+                if gap_audit['targeted_included_leaf_count']:
+                    validate_frozen_sources(pipeline, request, expanded)
+                    selected = expanded
+                    trace.update(selected_count=len(selected), context_tokens=gap_audit['source_tokens'],
+                        selected=[{'id': row['id'], 'score': row.get('score', 0),
+                                   'retrieval': row.get('retrieval', {})} for row in selected])
+                    assessment = await run.assess(selected)
+                    if assessment['status'] == 'sufficient': return run.finish(selected, trace, 'sources_sufficient')
+                    if assessment['status'] == 'needs_user_input': return run.finish([], trace, 'needs_user_input')
             if len(state['accepted']) >= run.options['max_documents']: break
         return run.finish([], trace, 'coverage_incomplete')
     except _Stop as exc:

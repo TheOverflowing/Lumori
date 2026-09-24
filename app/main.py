@@ -25,6 +25,7 @@ from . import document_storage, document_jobs, document_backends, document_lifec
 from .document_parsing import parser_capabilities
 from . import generation_preparation
 from .content_evaluations import current_evaluation, save_evaluation, CURRENT_EXPORT_SQL
+from .question_revision import RevisionRequest, prepare_revision, partial_content, validate_revision_asset
 
 STATIC=Path(__file__).parent/'static'
 
@@ -67,11 +68,20 @@ def create_app(settings=None,providers_factory=ApiProviders):
         await pipeline.start()
         yield
         await pipeline.stop()
-    app=FastAPI(title='Lumori',version='0.2.0-ca1',lifespan=lifespan)
+    app=FastAPI(title='Lumori',version='0.3.0',lifespan=lifespan)
     app.state.store=store;app.state.pipeline=pipeline;app.state.settings=settings;app.state.auth=auth
     app.add_middleware(TrustedHostMiddleware,allowed_hosts=settings.allowed_hosts)
     @app.get('/healthz',include_in_schema=False)
     async def health():
+        readiness=pipeline.readiness()
+        # Public probes expose availability, never account activity or queue size.
+        workers=readiness['workers']
+        return JSONResponse({'status':'ok' if readiness['ready'] else 'unavailable',
+                             'ready':readiness['ready'],'database':readiness['database'],
+                             'workers':workers['expected']>0 and workers['alive']==workers['expected']},
+                            status_code=200 if readiness['ready'] else 503)
+    @app.get('/livez',include_in_schema=False)
+    async def liveness():
         return {'status':'ok'}
 
     @app.middleware('http')
@@ -96,7 +106,11 @@ def create_app(settings=None,providers_factory=ApiProviders):
         result=await call_next(request)
         result.headers['X-Content-Type-Options']='nosniff'
         result.headers['X-Frame-Options']='DENY'
-        result.headers['Cache-Control']='no-store'
+        # Public source assets may be retained, but must revalidate against
+        # their ETag before reuse. Account data and the HTML shell stay private.
+        result.headers['Cache-Control']=('public, max-age=0, must-revalidate'
+            if request.url.path.startswith('/static/') and request.method in ('GET','HEAD')
+            and result.status_code in (200,304) else 'no-store')
         result.headers['Referrer-Policy']='same-origin'
         return result
     @app.exception_handler(AuthError)
@@ -416,6 +430,8 @@ def create_app(settings=None,providers_factory=ApiProviders):
         return submit(uid(),'index',{'document_id':did},request)
     def generation_scope(payload,request):
         need_course(payload.course_id,request)
+        if payload.use_subagents and settings.generation_workflow != 'agent_v1':
+            raise HTTPException(400,'当前服务未启用逐题子代理工作流。')
         if payload.document_ids:
             for did in payload.document_ids:need_document(did,request)
             own={r['id'] for r in store.all('SELECT id FROM documents WHERE course_id=?',(payload.course_id,))}
@@ -445,11 +461,27 @@ def create_app(settings=None,providers_factory=ApiProviders):
             raise HTTPException(409,str(exc)) from None
         if new:pipeline.enqueue(job['id'])
         return {'job_id':job['id'],'status':job['status'],'reused':not new}
-    # Expose only navigation metadata; job payloads can include private prompts.
+    # Keep job payloads private. A short title is enough to identify a task in Activity.
+    def public_job(row):
+        source = row.pop('source_title', None)
+        title = ' '.join(str(source or '').split())
+        row['title'] = title[:72].rstrip() + ('…' if len(title) > 72 else '') if title else None
+        return row
+
     job_context_sql='''
         SELECT j.id,j.kind,j.status,j.result,j.error,j.created_at,j.updated_at,o.user_id AS owner_id,
             CASE j.kind
+                WHEN 'generate' THEN json_extract(j.payload,'$.topic')
+                WHEN 'revise_question' THEN json_extract(c.asset,'$.title')
+                WHEN 'media' THEN json_extract(c.asset,'$.title')
+                WHEN 'index' THEN d.name
+                WHEN 'parse' THEN d.name
+                WHEN 'figures' THEN d.name
+            END AS source_title,
+            CASE WHEN j.kind='generate' THEN json_extract(j.payload,'$.material') END AS material,
+            CASE j.kind
                 WHEN 'generate' THEN json_extract(j.payload,'$.course_id')
+                WHEN 'revise_question' THEN json_extract(j.payload,'$.course_id')
                 WHEN 'prepare' THEN json_extract(j.payload,'$.course_id')
                 WHEN 'index' THEN d.course_id
                 WHEN 'parse' THEN d.course_id
@@ -458,32 +490,41 @@ def create_app(settings=None,providers_factory=ApiProviders):
             END AS course_id,
             COALESCE(
                 CASE WHEN j.status='succeeded' THEN json_extract(j.result,'$.content_id') END,
-                CASE WHEN j.kind='media' THEN json_extract(j.payload,'$.content_id') END
+                CASE WHEN j.kind IN ('media','revise_question') THEN json_extract(j.payload,'$.content_id') END
             ) AS content_id
         FROM jobs j
         JOIN job_owners o ON o.job_id=j.id
         LEFT JOIN documents d ON j.kind IN ('index','parse','figures') AND d.id=json_extract(j.payload,'$.document_id')
-        LEFT JOIN contents c ON j.kind='media' AND c.id=json_extract(j.payload,'$.content_id')
+        LEFT JOIN contents c ON j.kind IN ('media','revise_question') AND c.id=json_extract(j.payload,'$.content_id')
     '''
     @app.get('/api/jobs')
     async def jobs(request:Request,course_id:str|None=None):
         if course_id is not None:need_course(course_id,request)
         where=" WHERE owner_id=? AND kind!='prepare'"+(' AND course_id=?' if course_id is not None else '')
-        return store.all('SELECT id,kind,status,error,created_at,course_id,content_id FROM ('+
+        rows=store.all('SELECT id,kind,status,error,created_at,course_id,content_id,source_title,material FROM ('+
             job_context_sql+')'+where+' ORDER BY created_at DESC LIMIT 30',
             (account_id(request),course_id) if course_id is not None else (account_id(request),))
+        return [public_job(row) for row in rows]
     @app.get('/api/jobs/{jid}')
     async def job(jid:str,request:Request):
         row=store.one('SELECT * FROM ('+job_context_sql+') WHERE id=? AND owner_id=?',(jid,account_id(request)))
         if not row:raise HTTPException(404,'任务不存在')
+        public_job(row)
         row.pop('owner_id',None)
         row['result']=json.loads(row['result']) if row['result'] else None
+        row.update(store.job_control(jid) or {'cancel_requested':False,'cancellable':False})
+        if row['kind']=='prepare':row['cancellable']=False
+        row['partial_available']=False
         from .job_progress import snapshot
         row['timeline']=snapshot(store,row)
         from .generation_agent import progress
         evidence=store.one('SELECT evidence FROM job_evidence WHERE job_id=?',(jid,))
         try:
-            agent_progress=progress(json.loads(evidence['evidence'])) if evidence else None
+            saved_evidence=json.loads(evidence['evidence']) if evidence else {}
+            agent_progress=progress(saved_evidence) if evidence else None
+            row['partial_available']=row['kind']=='generate' and row['status']!='succeeded' and any(
+                slot.get('status')=='passed' and isinstance(slot.get('accepted_asset'),dict)
+                for slot in saved_evidence.get('agent',{}).get('slots',[]))
         except (ValueError,TypeError,KeyError,AttributeError):
             agent_progress=None  # Historical malformed audit rows cannot break task status.
         if agent_progress:
@@ -496,11 +537,25 @@ def create_app(settings=None,providers_factory=ApiProviders):
                 if not isinstance(exploration_state,dict) or exploration_state.get('status')!='complete':
                     row['progress']['resumable']=False
         return row
+    @app.post('/api/jobs/{jid}/cancel')
+    async def cancel_job(jid:str,request:Request):
+        current=await job(jid,request)
+        if current['kind']=='prepare':raise HTTPException(400,'此检查不支持后台取消。')
+        try:result=pipeline.request_cancel(jid)
+        except Conflict as exc:raise HTTPException(409,str(exc)) from None
+        if result is None:raise HTTPException(404,'任务不存在')
+        return {'job_id':jid,**result}
+    @app.get('/api/jobs/{jid}/partial-content')
+    async def partial_job_content(jid:str,request:Request):
+        current=await job(jid,request)
+        if current['kind']!='generate':raise HTTPException(400,'此任务没有可查看的部分内容。')
+        try:return partial_content(store,jid)
+        except ValueError as exc:raise HTTPException(404,str(exc)) from None
     @app.post('/api/jobs/{jid}/resume')
     async def resume_job(jid:str,request:Request):
         row=await job(jid,request)  # Same ownership boundary as job evidence/content.
-        if row['kind']!='generate':raise HTTPException(400,'此任务不支持继续生成')
-        if settings.generation_workflow!='agent_v1':raise HTTPException(409,'当前未启用此任务的 Agent 工作流，请恢复配置后继续。')
+        if row['kind'] not in ('generate','revise_question'):raise HTTPException(400,'此任务不支持继续生成')
+        if row['kind']=='generate' and settings.generation_workflow!='agent_v1':raise HTTPException(409,'当前未启用此任务的 Agent 工作流，请恢复配置后继续。')
         from .generation_agent import authorize_resume
         try:authorize_resume(store,jid)
         except ValueError as exc:raise HTTPException(409,str(exc)) from None
@@ -523,7 +578,7 @@ def create_app(settings=None,providers_factory=ApiProviders):
         resolved['include_explanations']=raw.get('include_explanations',configuration.get('include_explanations',True))
         fields=('course_id','topic','material','difficulty','difficulty_distribution',
                 'learner_profile','question_type','count','language','document_ids',
-                'query_fusion','auto_explore','include_explanations')
+                'query_fusion','auto_explore','use_subagents','include_explanations')
         return {'request':{key:resolved[key] for key in fields if key in resolved}}
     @app.get('/api/jobs/{jid}/evidence')
     async def job_evidence(jid:str,request:Request):
@@ -562,7 +617,11 @@ def create_app(settings=None,providers_factory=ApiProviders):
         if payload.action=='approve' and payload.asset is not None:raise HTTPException(400,'审核不能同时修改内容，请先保存新版本')
         asset=payload.asset or LearningAsset.model_validate_json(row['asset'])
         config=json.loads(row['config'])
-        try:validate_asset(asset,GenerateRequest(**({'request_key':'review-validation','include_explanations':True}|{k:v for k,v in config.items() if k in GenerateRequest.model_fields})),json.loads(row['sources']),enforce_difficulty='difficulty_plan' in config)
+        try:
+            if config.get('question_revision'):
+                validate_revision_asset(asset,config,json.loads(row['sources']))
+            else:
+                validate_asset(asset,GenerateRequest(**({'request_key':'review-validation','include_explanations':True}|{k:v for k,v in config.items() if k in GenerateRequest.model_fields})),json.loads(row['sources']),enforce_difficulty='difficulty_plan' in config)
         except ValueError as exc:raise HTTPException(400,str(exc)) from None
         if not asset.evidence_sufficient:raise HTTPException(400,'证据不足的材料不能保存或审核')
         version=row['version']+(payload.action=='save')
@@ -572,6 +631,33 @@ def create_app(settings=None,providers_factory=ApiProviders):
             if not changed:raise HTTPException(409,'内容发生并发更新，请刷新')
             if payload.action=='save':db.execute('INSERT INTO revisions VALUES(?,?,?,?)',(cid,version,dumps(asset.model_dump()),now()))
         return {'id':cid,'version':version,'status':'approved' if payload.action=='approve' else 'draft'}
+    @app.post('/api/contents/{cid}/questions/{slot_id}/revise',status_code=202)
+    async def revise_question(cid:str,slot_id:str,payload:RevisionRequest,request:Request):
+        row=need_content(cid,request)
+        # A successful revision changes the content version before a client may
+        # receive its response. Resolve retries against their original request,
+        # before checking today's version or provider availability.
+        owner=account_id(request)
+        key='account:'+hashlib.sha256(dumps([owner,payload.request_key]).encode()).hexdigest()
+        previous=store.one('''SELECT j.* FROM jobs j JOIN job_owners o ON o.job_id=j.id
+            WHERE j.request_key=? AND o.user_id=?''',(key,owner))
+        if previous:
+            original=json.loads(previous['payload'])
+            expected={'content_id':cid,'slot_id':slot_id,'base_version':payload.version,
+                      'mode':payload.mode,'instruction':payload.instruction,
+                      'requested_difficulty':payload.difficulty}
+            if previous['kind']!='revise_question' or any(original.get(field)!=value for field,value in expected.items()):
+                raise HTTPException(409,'重复请求标识对应不同参数')
+            return {'job_id':previous['id'],'status':previous['status'],'reused':True}
+        if payload.version!=row['version']:raise HTTPException(409,'内容已更新，请刷新后重试')
+        require('text')
+        try:frozen=prepare_revision(store,row,slot_id,payload)
+        except Conflict as exc:raise HTTPException(409,str(exc)) from None
+        except ValueError as exc:raise HTTPException(400,str(exc)) from None
+        # Preserve explicit difficulty choice separately from the resolved target
+        # level; omission and an explicit selection are different retry inputs.
+        frozen['requested_difficulty']=payload.difficulty
+        return submit(payload.request_key,'revise_question',frozen,request)
     @app.post('/api/contents/{cid}/media',status_code=202)
     async def make_media(cid:str,payload:MediaRequest,request:Request):
         row=need_content(cid,request)

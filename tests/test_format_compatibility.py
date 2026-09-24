@@ -16,12 +16,33 @@ def allow_mixed(rig):
     return rig
 
 
+def fixture_mcq_judgment(wire, response, contract):
+    """Preset B for this six-option fixture, independently of the author key.
+
+    This models consistent role judgments for controller tests, not real
+    answer quality. Never derive the solver's verdict from question.answer.
+    """
+    if (response.status_code != 200 or contract['task'] not in ('agent_solve', 'agent_review') or
+            contract['question'].get('options') != ['One', 'Two', 'Three', 'Four', 'Five', 'Six']):
+        return response
+    value = json.loads(response.json()['choices'][0]['message']['content'])
+    if contract['task'] == 'agent_solve':
+        value.update(answer='B', explanation='The preset answer for this controller fixture is Two (B).')
+    if 'question_checks' in contract['schema']['properties']:
+        value['question_checks'] = {'condition_issues': [], 'option_checks': [
+            {'label': chr(65 + index), 'verdict': 'correct' if index == 1 else 'incorrect',
+             'reason': 'Preset fixture judgment: only Two is designated correct.'}
+            for index in range(6)]}
+    return wire.response(value)
+
+
 def malformed_format(monkeypatch, defect, *, position=2, first_n=None):
     original = AgentWire.__call__
 
     def respond(self, request):
         response = original(self, request)
         contract = json.loads(json.loads(request.content)['messages'][1]['content'])
+        response = fixture_mcq_judgment(self, response, contract)
         where, _ = self.identity(contract)
         if (response.status_code != 200 or contract['task'] != 'agent_author' or where != position or
                 (first_n is not None and self.stage_counts[('agent_author', where)] > first_n)):
@@ -62,6 +83,10 @@ def test_three_strict_attempts_then_lossless_local_replay_and_real_review(
     if defect in ('options', 'both'):
         assert question['options'] == original['options'] and len(question['options']) == 6
         assert question['answer'] == 'B' and original['answer'] == '(B)'
+        assert compatible['solve']['response']['answer'] == 'B'
+        for role in ('solve', 'review'):
+            checks = compatible[role]['response']['question_checks']['option_checks']
+            assert [check['label'] for check in checks if check['verdict'] == 'correct'] == ['B']
         review = next(c for c in rig.wire.contracts if c['task'] == 'agent_review' and 'Fixture 02.' in c['question']['stem'])
         assert review['question']['options'] == question['options'] and review['question']['answer'] == 'B'
     if defect in ('concepts', 'both'):
@@ -144,6 +169,7 @@ def test_format_repairs_can_continue_beyond_six_attempts_until_a_valid_response(
     def respond(self, request):
         response = original(self, request)
         contract = json.loads(json.loads(request.content)['messages'][1]['content'])
+        response = fixture_mcq_judgment(self, response, contract)
         if contract['task'] != 'agent_author': return response
         raw = json.loads(response.json()['choices'][0]['message']['content'])
         raw['questions'][0].update(kind='mcq', options=['One', 'Two', 'Three', 'Four', 'Five', 'Six'],

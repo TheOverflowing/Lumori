@@ -1,6 +1,7 @@
 import { renderAsset, renderContentSources } from './content-renderer.js';
 import { mountCitations } from './citations.js';
 import { renderRatingPanel, bindRatingPanel, renderExportDialog, readExportOptions, renderReviewBar } from './content-review.js';
+import { renderQuestionRevisionDialog, bindQuestionRevision, renderQuestionComparison } from './question-revision.js';
 import { restoreGenerationDraft } from './generation-retry.js';
 import { renderLibraryRow, courseLibraryRows } from './content-library.js';
 import { downloadFile } from './downloads.js';
@@ -10,6 +11,7 @@ import { createSessionClient, isSessionChange, accountCourseKey } from './auth.j
 import { parsingDialog, parsingPage, parsingLabel, parserControls } from './parsing.js';
 import { renderOutputFormats, renderMultimodal } from './multimodal.js';
 import { watchResource } from './live-updates.js';
+import { beginViewLoad, patchCollection } from './view-updates.js';
 import { renderGenerationProgress, mountGenerationProgress, watchGenerationProgress } from './generation-progress.js';
 import { mountInputControls } from './input-controls.js';
 import { t, m, a, setText, localize, formatDate } from './i18n.js';
@@ -24,11 +26,12 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const page = $('#page');
 const modal = $('#modal');
 let pageInputs = null, modalInputs = null;
+let routeLoad = null;
 modal.addEventListener('close', () => { modalInputs?.destroy(); modalInputs = null; });
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const icon = name => `<img class="icon" src="/static/icons/${name}.svg" alt="">`;
-const titles = {home:'课程概览', documents:'课程资料', generate:'创作学习材料', contents:'内容与审核', jobs:'任务记录', progress:'生成进度', content:'内容详情', learning:'学习材料'};
-const labels = {ready:'索引就绪', parsed:'待建索引', draft:'待审核', approved:'已确认', queued:'排队中', running:'处理中', succeeded:'已完成', failed:'处理失败', insufficient_evidence:'资料依据不足', parse:'资料解析', figures:'图片理解', pending:'待处理', parse_failed:'解析失败', index:'资料索引', generate:'内容生成', media:'媒体生成', vision:'视觉理解模型', text:'文本模型', embedding:'嵌入模型', speech:'语音模型', image:'图像模型'};
+const titles = {home:'课程概览', documents:'课程资料', generate:'创作学习材料', contents:'内容与审核', jobs:'任务记录', progress:'生成进度', content:'内容详情', partial:'已完成题目', learning:'学习材料'};
+const labels = {ready:'索引就绪', parsed:'待建索引', draft:'待审核', approved:'已确认', queued:'排队中', running:'处理中', cancelled:'已停止', revise_question:'题目修改', succeeded:'已完成', failed:'处理失败', insufficient_evidence:'资料依据不足', parse:'资料解析', figures:'图片理解', pending:'待处理', parse_failed:'解析失败', index:'资料索引', generate:'内容生成', media:'媒体生成', vision:'视觉理解模型', text:'文本模型', embedding:'嵌入模型', speech:'语音模型', image:'图像模型'};
 const kinds = {lesson:'学习讲解', quiz:'测验练习', assignment:'课后作业'};
 const badge = status => `<span class="badge ${esc(status)}">${m(labels[status] || status)}</span>`;
 const button = (label, action, style = '', attrs = '') => `<button class="${style}" data-action="${action}" ${attrs}>${label.includes('<') ? label : m(label)}</button>`;
@@ -55,8 +58,10 @@ const generationPreferences = createGenerationPreferences({
     if(control)control.checked=detail.queryFusion;
     const explorationControl=$('#auto-explore');
     if(explorationControl)explorationControl.checked=detail.autoExplore;
+    const subagentControl=$('#use-subagents');
+    if(subagentControl)subagentControl.checked=detail.useSubagents;
     for(const option of $$('input[name="progress-mode"]',modal))option.checked=option.value===detail.progressMode;
-    if(detail.changed.some(key=>['queryFusion','autoExplore'].includes(key)))window.dispatchEvent(new CustomEvent('generationpreferenceschange',{detail}));
+    if(detail.changed.some(key=>['queryFusion','autoExplore','useSubagents'].includes(key)))window.dispatchEvent(new CustomEvent('generationpreferenceschange',{detail}));
     if(detail.changed.includes('progressMode')&&state.route.page==='progress')void renderRoute();
   },
 });
@@ -64,6 +69,7 @@ function clearWorkspace(reason = '') {
   workspaceReady = false;
   generationPreferences.setAccount(null);
   state.cleanup?.(); state.cleanup = null;
+  routeLoad?.cancel(); routeLoad = null;
   pageInputs?.destroy(); pageInputs = null;
   modalInputs?.destroy(); modalInputs = null;
   state.revision++;
@@ -211,12 +217,15 @@ function selectCourse(id) {
 function replaceRows(root, html) {
   const focused = root.contains(document.activeElement) ? document.activeElement : null;
   const action = focused?.dataset.action, id = focused?.dataset.id;
-  root.innerHTML = html;
-  if (action) $$('[data-action]', root).find(control => control.dataset.action === action && control.dataset.id === id)?.focus({preventScroll:true});
+  const documentId = focused?.dataset.document;
+  patchCollection(root, html);
+  if (action && !focused.isConnected) $$('[data-action]', root).find(control => control.dataset.action === action && control.dataset.id === id)?.focus({preventScroll:true});
+  else if (documentId && !focused.isConnected) $$('[data-document]',root).find(control=>control.dataset.document===documentId)?.focus({preventScroll:true});
 }
 function liveError(root, error) {
-  root.hidden = !error;
-  root.innerHTML = error ? `${m('自动更新暂不可用')} ${button('刷新状态','retry','link')}` : '';
+  if (root.hidden !== !error) root.hidden = !error;
+  const html = error ? `${m('自动更新暂不可用')} ${button('刷新状态','retry','link')}` : '';
+  if (root.innerHTML !== html) root.innerHTML = html;
 }
 async function loadCourses() {
   state.courses = await api('/courses');
@@ -226,7 +235,7 @@ async function loadCourses() {
 }
 function courseUrl(resource, course = state.course) { return `/${resource}?course_id=${encodeURIComponent(course)}`; }
 function renderNavigation(name) {
-  const active = name === 'content' ? 'contents' : name === 'progress' ? 'jobs' : name;
+  const active = name === 'content' ? 'contents' : ['progress','partial'].includes(name) ? 'jobs' : name;
   $$('nav a').forEach(link => { if (link.dataset.page === active) link.setAttribute('aria-current','page'); else link.removeAttribute('aria-current'); });
   setText($('#route-label'), titles[name] || titles.home);
   document.title = `${t(titles[name] || titles.home)} · ${t('知序')}`;
@@ -260,6 +269,7 @@ async function renderRoute() {
   if (!workspaceReady || !auth.session.user) return;
   state.cleanup?.(); state.cleanup = null;
   pageInputs?.destroy(); pageInputs = null;
+  routeLoad?.cancel();
   const revision = ++state.revision;
   const [requested = 'home', rawId = ''] = location.hash.slice(1).split('/');
   const name = state.learningId ? 'learning' : (renderers[requested] ? requested : 'home');
@@ -267,17 +277,20 @@ async function renderRoute() {
   state.route = {page:name, id};
   renderNavigation(name);
   $('#toolbar-actions').innerHTML = '';
-  page.innerHTML = `<div class="loading" role="status">${m('正在载入…')}</div>`;
-  window.scrollTo({top:0,behavior:'instant'});
+  const loading = routeLoad = beginViewLoad(page, `<div class="loading" role="status">${m('正在载入…')}</div>`);
+  const read = path => api(path, 'GET', undefined, {signal:loading.signal});
   try {
-    const result = await renderers[name](id);
+    const result = await renderers[name](id, read);
     if (revision !== state.revision) return;
+    loading.finish();
     page.innerHTML = result.html;
     $('#toolbar-actions').innerHTML = result.toolbar || '';
     state.cleanup = result.bind?.() || null;
     pageInputs = mountInputControls(page);
+    window.scrollTo({top:0,behavior:'instant'});
   } catch (error) {
-    if (revision !== state.revision) return;
+    if (revision !== state.revision || loading.signal.aborted) return;
+    loading.finish();
     page.innerHTML = empty('暂时无法载入', error.uiMessage || error.message, 'retry', '重新尝试');
   }
 }
@@ -285,10 +298,10 @@ function materialRow(content, showCourse = false) {
   return renderLibraryRow(content,{showCourse});
 }
 
-async function renderHome() {
+async function renderHome(_id, read = api) {
   if (!state.course) return {...courseRequired(), toolbar:button('模型连接','settings','secondary')};
   const course = state.courses.find(item => item.id === state.course);
-  const [docs, contents] = await Promise.all([api(courseUrl('documents')), api(courseUrl('contents'))]);
+  const [docs, contents] = await Promise.all([read(courseUrl('documents')), read(courseUrl('contents'))]);
   const drafts = contents.filter(content => content.status === 'draft').length;
   return {
     toolbar:button(icon('upload')+m('导入资料'),'upload','secondary'),
@@ -299,9 +312,9 @@ async function renderHome() {
   };
 }
 
-async function renderDocuments() {
+async function renderDocuments(_id, read = api) {
   if (!state.course) return courseRequired();
-  let docs = await api(courseUrl('documents')+'&include_deleted=true');
+  let docs = await read(courseUrl('documents')+'&include_deleted=true');
   const documentsCourse=state.course;
   return {
     toolbar:button(icon('upload')+m('导入资料'),'upload'),
@@ -310,10 +323,11 @@ async function renderDocuments() {
       let filter = 'all';
       const saves=new Map(),confirmed=new Map(docs.map(d=>[d.id,d.enabled!==false]));
       const paint = () => {
-        $('[data-filter=all]').innerHTML=m('全部 {n}',{n:docs.filter(d=>!d.deleted_at).length});
+        const total=docs.filter(d=>!d.deleted_at).length;
+        if ($('[data-filter=all]').dataset.total !== String(total)) { $('[data-filter=all]').dataset.total=total; $('[data-filter=all]').innerHTML=m('全部 {n}',{n:total}); }
         const query = $('#file-search').value.trim().toLowerCase();
         const rows = docs.filter(doc => doc.name.toLowerCase().includes(query) && (filter==='deleted'?Boolean(doc.deleted_at):!doc.deleted_at&&(filter==='all'||(filter==='ready')===Boolean(doc.index_current))));
-        $('#files').innerHTML = rows.length ? `<div class="collection">${rows.map(doc=>`<div class="collection-row document-row ${doc.enabled===false?'document-inactive':''}"><span class="file-icon">${icon('file-text')}</span><div class="row-main"><h3 id="document-name-${esc(doc.id)}">${esc(doc.name)}</h3><p>${m('{n} 页',{n:doc.pages})} · ${m('{n} 个知识片段',{n:doc.chunks})}${['needs_review','unreadable'].includes(doc.parsing?.status)?' · '+m(parsingLabel(doc.parsing.status)):''}${doc.active_jobs?.length?' · '+m('后台处理中'):''}${doc.figures?.length?' · '+m('可检索图片 {ready} / {total}',{ready:doc.figures.filter(f=>f.status==='ready').length,total:doc.figures.length}):''}</p>${renderExternalSource(doc)}</div>${badge(['pending','parse_failed'].includes(doc.status)?doc.status:doc.index_current?'ready':'parsed')}<div class="document-management">${documentControls(doc)}</div><div class="row-actions" ${doc.deleted_at?'hidden':''}>${button('文字与原图','parsing','secondary',`data-id="${esc(doc.id)}"`)}${button('阅读片段','chunks','secondary',`data-id="${esc(doc.id)}" data-name="${esc(doc.name)}"`)}${button(doc.index_current?'重建索引':'建立索引','index','secondary',`data-id="${esc(doc.id)}" ${doc.status==='pending'?'disabled':''}`)}</div></div>`).join('')}</div>` : empty(docs.length?'没有匹配的资料':'暂无资料',docs.length?'试试其他名称或筛选条件。':'',docs.length?'':'upload','导入资料','files');
+        replaceRows($('#files'), rows.length ? `<div class="collection">${rows.map(doc=>`<div data-row-key="document:${esc(doc.id)}" class="collection-row document-row ${doc.enabled===false?'document-inactive':''}"><span class="file-icon">${icon('file-text')}</span><div class="row-main"><h3 id="document-name-${esc(doc.id)}">${esc(doc.name)}</h3><p>${m('{n} 页',{n:doc.pages})} · ${m('{n} 个知识片段',{n:doc.chunks})}${['needs_review','unreadable'].includes(doc.parsing?.status)?' · '+m(parsingLabel(doc.parsing.status)):''}${doc.active_jobs?.length?' · '+m('后台处理中'):''}${doc.figures?.length?' · '+m('可检索图片 {ready} / {total}',{ready:doc.figures.filter(f=>f.status==='ready').length,total:doc.figures.length}):''}</p>${renderExternalSource(doc)}</div>${badge(['pending','parse_failed'].includes(doc.status)?doc.status:doc.index_current?'ready':'parsed')}<div class="document-management">${documentControls(doc)}</div><div class="row-actions" ${doc.deleted_at?'hidden':''}>${button('文字与原图','parsing','secondary',`data-id="${esc(doc.id)}"`)}${button('阅读片段','chunks','secondary',`data-id="${esc(doc.id)}" data-name="${esc(doc.name)}"`)}${button(doc.index_current?'重建索引':'建立索引','index','secondary',`data-id="${esc(doc.id)}" ${doc.status==='pending'?'disabled':''}`)}</div></div>`).join('')}</div>` : empty(docs.length?'没有匹配的资料':'暂无资料',docs.length?'试试其他名称或筛选条件。':'',docs.length?'':'upload','导入资料','files'));
         $$('.document-enabled').forEach(input=>{input.onchange=()=>{
           const id=input.dataset.document,doc=docs.find(d=>d.id===id),enabled=input.checked;
           doc.enabled=enabled;
@@ -328,7 +342,7 @@ async function renderDocuments() {
       $('#file-search').oninput = paint;
       $$('[data-filter]').forEach(control => control.onclick = () => {filter=control.dataset.filter;$$('[data-filter]').forEach(item=>item.setAttribute('aria-pressed',String(item===control)));paint();});
       paint();
-      return watchResource({load:()=>api(courseUrl('documents',documentsCourse)+'&include_deleted=true'),initial:docs,update:next=>{if(!saves.size&&JSON.stringify(docs)!==JSON.stringify(next)){docs=next;docs.forEach(d=>confirmed.set(d.id,d.enabled!==false));paint();}}});
+      return watchResource({load:({signal})=>api(courseUrl('documents',documentsCourse)+'&include_deleted=true','GET',undefined,{signal}),initial:docs,update:next=>{if(!saves.size&&JSON.stringify(docs)!==JSON.stringify(next)){docs=next;docs.forEach(d=>confirmed.set(d.id,d.enabled!==false));paint();}}});
     }
   };
 }
@@ -336,11 +350,11 @@ function draftFor(course = state.course) {
   if (!state.drafts.has(course)) state.drafts.set(course,{material:'lesson',topic:'',difficulty:'medium',language:'zh',question_type:'mixed',count:3});
   return ensureDifficultyDraft(state.drafts.get(course));
 }
-async function renderGenerate() {
+async function renderGenerate(_id, read = api) {
   if (!state.course) return courseRequired();
   const course = state.course;
   const draft = draftFor(course);
-  const [docs,status] = await Promise.all([api(courseUrl('documents',course)),api('/status')]);
+  const [docs,status] = await Promise.all([read(courseUrl('documents',course)),read('/status')]);
   const ready = docs.filter(doc=>doc.index_current&&doc.enabled!==false).length;
   const select = (id,label,values) => `<label class="select-field">${m(label)}<select id="${id}" name="${id}">${values.map(([value,text])=>`<option value="${value}" ${String(draft[id])===value?'selected':''} data-i18n="${text}">${t(text)}</option>`).join('')}</select></label>`;
   return {
@@ -431,7 +445,7 @@ async function renderGenerate() {
         updateDifficultyControls(form,draft);
         updateExplanationOption(form,draft);
         setText($('#draft-kind'), kinds[draft.material]);
-        $('#draft-summary').innerHTML=`${m(draft.language==='zh'?'中文':'English')} · ${difficultySummary(draft)}${!lesson&&draft.difficulty_mode==='distribution'?` · ${m('{n} 道题',{n:draft.count||'—'})}`:''}`;
+        $('#draft-summary').innerHTML=`${m(draft.language==='zh'?'中文':'English')} · ${difficultySummary(draft)}${!lesson&&draft.difficulty_mode==='distribution'?` · ${m('{n} 道题',{n:draft.count||'—'})}`:''}${!lesson&&generationPreferences.useSubagents?` · ${m('逐题子代理')}`:''}`;
         const nextSignature=JSON.stringify(generationPayload(draft));
         if((draftSignature&&draftSignature!==nextSignature)||event?.target?.id==='check-missing-details')flow.cancel();
         draftSignature=nextSignature;
@@ -439,7 +453,7 @@ async function renderGenerate() {
       form.oninput=update;form.onchange=update;update();updateEligibility();
       bindDifficultyPresets(form,draft,update);
       const appearanceUpdated=()=>update();
-      const preferencesUpdated=()=>{if(flow.state.phase!=='submitting')flow.cancel();updateEligibility();};
+      const preferencesUpdated=()=>{if(flow.state.phase!=='submitting')flow.cancel();update();updateEligibility();};
       const settingsOpening=event=>{if(flow.state.phase==='submitting')event.preventDefault();else flow.cancel();};
       window.addEventListener('appearancechange',appearanceUpdated);
       window.addEventListener('generationpreferenceschange',preferencesUpdated);
@@ -451,7 +465,7 @@ async function renderGenerate() {
         if(!form.reportValidity())return;
         $('.error-message',form)?.remove();
         if(flow.state.phase==='retry_generation'){perform(()=>flow.retry());return;}
-        const snapshot={...generationPayload(draft),...generationPreferences.requestFields(),count:draft.material==='lesson'?3:draft.count,course_id:course,request_key:crypto.randomUUID()};
+        const snapshot={...generationPayload(draft),...generationPreferences.requestFields(draft.material),count:draft.material==='lesson'?3:draft.count,course_id:course,request_key:crypto.randomUUID()};
         perform(()=>flow.start(snapshot,{check:$('#check-missing-details',form).checked}));
       };
       return ()=>{
@@ -466,23 +480,23 @@ async function renderGenerate() {
 }
 function jobRow(job, generation = false) {
   const course = state.courses.find(item => item.id === job.course_id);
-  const pending = ['queued','running'].includes(job.status);
-  const title = generation ? (pending ? '生成中' : '生成未完成') : (labels[job.kind] || job.kind);
+  const title = job.title ? esc(job.title) : m(labels[job.kind] || job.kind);
+  const type = job.kind === 'generate' ? (kinds[job.material] || labels.generate) : (labels[job.kind] || job.kind);
   const action = job.content_id && job.status === 'succeeded'
     ? button('打开','open-content','secondary',`data-id="${esc(job.content_id)}"`)
     : button(generation?'查看任务':'查看详情','job-details','secondary',`data-id="${esc(job.id)}"`);
-  return `<div class="collection-row ${generation?'generation-row':''}"><span class="file-icon">${icon('clock-3')}</span><div class="row-main"><h3>${m(title)}</h3><p>${course?`${esc(course.name)} · `:''}${date(job.created_at)}</p>${job.error?`<p class="job-error">${m(job.error)}</p>`:''}</div>${badge(job.status)}<div class="row-actions">${action}</div></div>`;
+  return `<div data-row-key="job:${esc(job.id)}" class="collection-row ${generation?'generation-row':''}"><span class="file-icon">${icon('clock-3')}</span><div class="row-main"><h3>${title}</h3><p>${m(type)} · ${course?`${esc(course.name)} · `:''}${date(job.created_at)}</p>${job.error?`<p class="job-error">${m(job.error)}</p>`:''}</div>${badge(job.status)}<div class="row-actions">${action}</div></div>`;
 }
-async function renderContents() {
+async function renderContents(_id, read = api) {
   if (!state.course) return courseRequired();
   const course = state.course;
   const view = state.library;
   view.course = course;
-  const load = async () => {
-    const [rows,jobs] = await Promise.all([api(courseUrl('contents',course)),api(courseUrl('jobs',course))]);
+  const load = async (request = api) => {
+    const [rows,jobs] = await Promise.all([request(courseUrl('contents',course)),request(courseUrl('jobs',course))]);
     return {rows,jobs};
   };
-  let data = await load();
+  let data = await load(read);
   return {
     toolbar:button(icon('plus')+m('创作材料'),'generate'),
     html:heading('内容与审核')+`<div class="collection-tools library-tools"><div class="segmented" ${a('内容状态筛选','aria-label')}><button data-content-filter="all" aria-pressed="${view.filter==='all'}">${m('全部')}</button><button data-content-filter="draft" aria-pressed="${view.filter==='draft'}"><span id="draft-filter-label"></span></button><button data-content-filter="approved" aria-pressed="${view.filter==='approved'}">${m('已确认')}</button></div><div class="library-filters"><label class="search"><span class="sr-only">${m('搜索学习材料')}</span><input id="content-search" type="search" value="${esc(view.query)}" ${a('搜索材料标题','placeholder')}></label></div></div><div id="library-update-error" class="live-update-error" role="status" hidden></div><div id="generation-status" aria-live="polite"></div><div id="content-list"></div>`,
@@ -492,7 +506,7 @@ async function renderContents() {
         setText($('#draft-filter-label'),'待审核 {n}',{n:scoped.filter(row=>row.status==='draft').length});
         const query = view.query.trim().toLowerCase();
         const selected = scoped.filter(row=>(view.filter==='all'||row.status===view.filter)&&row.title.toLowerCase().includes(query));
-        const generationJobs = query || view.filter === 'approved' ? [] : courseLibraryRows(data.jobs,course).filter(job=>job.kind==='generate'&&job.status!=='succeeded');
+        const generationJobs = query || view.filter === 'approved' ? [] : courseLibraryRows(data.jobs,course).filter(job=>['generate','revise_question'].includes(job.kind)&&job.status!=='succeeded');
         const activeJobs = generationJobs.filter(job=>['queued','running'].includes(job.status));
         const failedJobs = generationJobs.filter(job=>!['queued','running'].includes(job.status)).slice(0,3);
         replaceRows($('#generation-status'), [...activeJobs,...failedJobs].map(job=>jobRow(job,true)).join(''));
@@ -501,7 +515,7 @@ async function renderContents() {
       $('#content-search').oninput = () => {view.query=$('#content-search').value;paint();};
       $$('[data-content-filter]').forEach(control=>control.onclick=()=>{view.filter=control.dataset.contentFilter;$$('[data-content-filter]').forEach(item=>item.setAttribute('aria-pressed',String(item===control)));paint();});
       paint();
-      return watchResource({load,initial:data,update:next=>{data=next;paint();},error:cause=>liveError($('#library-update-error'),cause)});
+      return watchResource({load:({signal})=>load(path=>api(path,'GET',undefined,{signal})),initial:data,update:next=>{data=next;paint();},error:cause=>liveError($('#library-update-error'),cause)});
     }
   };
 }
@@ -514,12 +528,12 @@ function renderMedia(media, review=false, version=0) {
     return `<div class="media-item"><div class="row-actions"><small>${m(label)}</small>${review?badge(item.status):''}</div>${player}<div class="row-actions"><a class="button secondary" href="/api/media/${encodeURIComponent(item.id)}/download" download>${m('下载')}</a>${review?button(item.status==='approved'?'媒体已确认':'确认媒体内容','approve-media','secondary',`data-id="${esc(item.id)}" data-version="${version}" ${item.status==='approved'?'disabled':''}`):''}</div></div>`;
   }).join('');
 }
-async function renderContent(id) {
-  const content=await api('/contents/'+encodeURIComponent(id));
+async function renderContent(id, read = api) {
+  const content=await read('/contents/'+encodeURIComponent(id));
   const cid=encodeURIComponent(id);
   return {
     toolbar:button('返回内容库','contents','secondary'),
-    html:`${renderReviewBar(content)}<div class="review-layout"><div><article class="document-paper">${renderAsset(content.asset,true,content.difficulty_assessment,content.sources)}<div class="submit-bar"><div class="row-actions">${button('编辑内容','edit-content','secondary')}${button(content.status==='approved'?'文字已确认':'确认文字','approve-content','',content.status==='approved'?'disabled':'')}</div></div><div id="edit-panel"></div></article></div>
+    html:`${renderReviewBar(content)}<div class="review-layout"><div><article class="document-paper">${renderQuestionComparison(content)}${renderAsset(content.asset,true,content.difficulty_assessment,content.sources,{editableQuestions:true})}<div class="submit-bar"><div class="row-actions">${button('编辑内容','edit-content','secondary')}${button(content.status==='approved'?'文字已确认':'确认文字','approve-content','',content.status==='approved'?'disabled':'')}</div></div><div id="edit-panel"></div></article></div>
       <aside class="review-inspector"><section class="inspector-section"><h2>${m('资料依据')}</h2>${renderContentSources(content.sources,content.asset)}</section>
       ${renderMultimodal(content, renderMedia)}
       ${renderDifficultyAssessment(content)}
@@ -536,44 +550,53 @@ async function renderContent(id) {
   };
 }
 function editContent() {
-  const content=state.content;
+  const content=state.content, revision=state.revision;
   const asset=structuredClone(content.asset);
   const field=(title,path,value)=>`<label>${Array.isArray(title)?m(...title):m(title)}<textarea data-path="${path}" required>${esc(value)}</textarea></label>`;
   $('#edit-panel').innerHTML=`<div class="edit-panel"><h3>${m('编辑版本 {n}',{n:content.version})}</h3><form id="edit-form">${field('标题','title',asset.title)}${asset.sections.map((section,index)=>field(['小节 {n} 标题',{n:index+1}],`sections.${index}.heading`,section.heading)+field(['小节 {n} 内容',{n:index+1}],`sections.${index}.text`,section.text)).join('')}${asset.questions.map((question,index)=>field(['第 {n} 题',{n:index+1}],`questions.${index}.stem`,question.stem)+question.options.map((option,i)=>field(['选项 {letter}',{letter:String.fromCharCode(65+i)}],`questions.${index}.options.${i}`,option)).join('')+field('参考答案',`questions.${index}.answer`,question.answer)+field('答案解析',`questions.${index}.explanation`,question.explanation)).join('')}<label>${m('配图描述')}<textarea data-path="visual_prompt">${esc(asset.visual_prompt)}</textarea></label><div class="modal-actions">${button('取消编辑','cancel-edit','secondary','type="button"')}<button type="submit">${m('保存新版本')}</button></div></form></div>`;
   pageInputs?.refresh();
   $('#edit-panel').scrollIntoView({block:'start',behavior:'instant'});
-  $('#edit-form').onsubmit=event=>{event.preventDefault();const form=event.currentTarget;busy($('button[type=submit]',form),async()=>{$$('[data-path]',form).forEach(input=>{const keys=input.dataset.path.split('.');let target=asset;for(const key of keys.slice(0,-1))target=target[key];target[keys.at(-1)]=input.value;});await api(`/contents/${encodeURIComponent(content.id)}/review`,'POST',{version:content.version,action:'save',asset});notify('新版本已保存，请重新审核。');await renderRoute();},form);};
+  $('#edit-form').onsubmit=event=>{event.preventDefault();const form=event.currentTarget;busy($('button[type=submit]',form),async()=>{$$('[data-path]',form).forEach(input=>{const keys=input.dataset.path.split('.');let target=asset;for(const key of keys.slice(0,-1))target=target[key];target[keys.at(-1)]=input.value;});await api(`/contents/${encodeURIComponent(content.id)}/review`,'POST',{version:content.version,action:'save',asset});if(revision!==state.revision)return;notify('新版本已保存，请重新审核。');await renderRoute();},form);};
 }
-async function renderProgress(id) {
+async function renderProgress(id, read = api) {
   const revision = state.revision;
-  const job = await api(`/jobs/${encodeURIComponent(id)}`);
+  const job = await read(`/jobs/${encodeURIComponent(id)}`);
   if (revision === state.revision && job.course_id) selectCourse(job.course_id);
   return {
     html:renderGenerationProgress(job,{mode:generationPreferences.progressMode}),
     bind() {
       const view = mountGenerationProgress($('[data-generation-progress]'),job,{mode:generationPreferences.progressMode});
-      const stop = watchGenerationProgress({load:()=>api(`/jobs/${encodeURIComponent(id)}`),initial:job,update:view.update,error:view.connection});
+      const stop = watchGenerationProgress({load:({signal})=>api(`/jobs/${encodeURIComponent(id)}`,'GET',undefined,{signal}),initial:job,update:view.update,error:view.connection});
       return ()=>{stop();view.destroy?.();};
     }
   };
 }
 
-async function renderJobs() {
-  const rows=await api('/jobs');
+async function renderPartial(id, read = api) {
+  const partial = await read(`/jobs/${encodeURIComponent(id)}/partial-content`);
+  return {
+    toolbar:button('返回任务','job-details','secondary',`data-id="${esc(id)}"`),
+    html:`<div class="partial-content-heading"><h1>${m('已完成题目')}</h1><p>${m('已完成 {done} / {total} 题',{done:partial.completed,total:partial.total})}<span aria-hidden="true"> · </span>${m('部分结果，尚未完整生成')}</p></div><article class="document-paper partial-content">${renderAsset(partial.asset,true,null,partial.sources,{originalQuestionNumbers:true})}<details class="partial-sources"><summary>${m('资料依据')}</summary>${renderContentSources(partial.sources,partial.asset)}</details></article>`,
+    bind() { return mountCitations(page,partial.sources,partial.asset); }
+  };
+}
+
+async function renderJobs(_id, read = api) {
+  const rows=await read('/jobs');
   const render = rows => rows.length?`<div class="collection">${rows.map(job=>jobRow(job)).join('')}</div>`:empty('暂无任务','','documents','前往课程资料','clock-3');
   return {
     toolbar:button('刷新状态','retry','secondary'),
     html:heading('任务记录')+`<div id="jobs-update-error" class="live-update-error" role="status" hidden></div><div id="job-list">${render(rows)}</div>`,
-    bind() { return watchResource({load:()=>api('/jobs'),initial:rows,update:next=>replaceRows($('#job-list'),render(next)),error:cause=>liveError($('#jobs-update-error'),cause)}); }
+    bind() { return watchResource({load:({signal})=>api('/jobs','GET',undefined,{signal}),initial:rows,update:next=>replaceRows($('#job-list'),render(next)),error:cause=>liveError($('#jobs-update-error'),cause)}); }
   };
 }
 
-async function renderLearning() {
+async function renderLearning(_id, read = api) {
   document.body.classList.add('learning');
-  const data=await api(`/learn/${encodeURIComponent(state.learningId)}?reveal_answers=${Boolean(state.reveal)}`);
+  const data=await read(`/learn/${encodeURIComponent(state.learningId)}?reveal_answers=${Boolean(state.reveal)}`);
   return {html:`<article class="document-paper">${renderAsset(data.asset,false)}${!state.reveal&&data.asset.questions.length?`<div class="submit-bar">${button('查看答案与解析','reveal')}</div>`:''}${renderMedia(data.media)}</article>`};
 }
-const renderers={home:renderHome,documents:renderDocuments,generate:renderGenerate,contents:renderContents,jobs:renderJobs,progress:renderProgress,content:renderContent,learning:renderLearning};
+const renderers={home:renderHome,documents:renderDocuments,generate:renderGenerate,contents:renderContents,jobs:renderJobs,progress:renderProgress,content:renderContent,partial:renderPartial,learning:renderLearning};
 
 const actions={
   account:()=>{const user=auth.session.user;if(!user)return;dialog('账号',`<div class="account-details"><strong>${esc(user.display_name)}</strong><p>${esc(user.email)}</p></div><div class="modal-actions">${button('退出登录','logout','secondary')}</div>`);},
@@ -593,11 +616,14 @@ const actions={
   settings:async()=>{
     if(!window.dispatchEvent(new Event('generationsettingsopen',{cancelable:true})))return;
     const epoch=auth.epoch;
-    dialog('设置',renderSettings(generationPreferences.queryFusion,generationPreferences.progressMode,generationPreferences.autoExplore));
+    dialog('设置',renderSettings(generationPreferences.queryFusion,generationPreferences.progressMode,
+      generationPreferences.autoExplore,generationPreferences.useSubagents));
     const panel=$('[data-settings-panel]',modal), control=$('#query-fusion',panel);
     control.onchange=()=>{if(epoch===auth.epoch)generationPreferences.setQueryFusion(control.checked);};
     const explorationControl=$('#auto-explore',panel);
     explorationControl.onchange=()=>{if(epoch===auth.epoch)generationPreferences.setAutoExplore(explorationControl.checked);};
+    const subagentControl=$('#use-subagents',panel);
+    subagentControl.onchange=()=>{if(epoch===auth.epoch)generationPreferences.setUseSubagents(subagentControl.checked);};
     for(const option of $$('input[name="progress-mode"]',panel))option.onchange=()=>{if(epoch===auth.epoch&&option.checked)generationPreferences.setProgressMode(option.value);};
     try{
       const status=await api('/status');
@@ -622,7 +648,7 @@ const actions={
   'delete-document':async control=>{await api(`/documents/${encodeURIComponent(control.dataset.id)}`,'DELETE');notify('文件已移到最近删除，可随时恢复。');await renderRoute();},
   'restore-document':async control=>{await api(`/documents/${encodeURIComponent(control.dataset.id)}/restore`,'POST');notify('文件已恢复，开启“用于生成”即可继续使用原索引。');await renderRoute();},
   index:async control=>{await api(`/documents/${encodeURIComponent(control.dataset.id)}/index`,'POST');notify('索引任务已创建。');go('jobs');},
-  'job-details':async control=>{const revision=state.revision;const job=await api(`/jobs/${encodeURIComponent(control.dataset.id)}`);if(revision!==state.revision)return;if(job.course_id)selectCourse(job.course_id);if(['generate','media'].includes(job.kind))return go('progress',job.id);if(job.status==='succeeded'&&(job.content_id||job.result?.content_id))return go('content',job.content_id||job.result.content_id);dialog('任务详情',`${badge(job.status)}${job.progress?`<p>${m('已完成 {done} / {total} 题',{done:job.progress.completed,total:job.progress.total})}</p>`:''}<div class="inline-note">${m(job.error||job.result?.message||(job.status==='succeeded'?'处理完成，可以返回资料库查看索引状态。':'任务正在处理，请稍后刷新状态。'))}</div>${job.status==='failed'&&job.progress?.resumable?`<div class="modal-actions">${button('继续生成','resume-generation','secondary',`data-id="${esc(job.id)}"`)}</div>`:''}`);},
+  'job-details':async control=>{const revision=state.revision;const job=await api(`/jobs/${encodeURIComponent(control.dataset.id)}`);if(revision!==state.revision)return;if(job.course_id)selectCourse(job.course_id);if(['generate','revise_question','media'].includes(job.kind))return go('progress',job.id);if(job.status==='succeeded'&&(job.content_id||job.result?.content_id))return go('content',job.content_id||job.result.content_id);dialog('任务详情',`${badge(job.status)}${job.progress?`<p>${m('已完成 {done} / {total} 题',{done:job.progress.completed,total:job.progress.total})}</p>`:''}<div class="inline-note">${m(job.error||job.result?.message||(job.status==='succeeded'?'处理完成，可以返回资料库查看索引状态。':'任务正在处理，请稍后刷新状态。'))}</div>${job.status==='failed'&&job.progress?.resumable?`<div class="modal-actions">${button('继续生成','resume-generation','secondary',`data-id="${esc(job.id)}"`)}</div>`:''}`);},
   'restore-generation':async control=>{
     const revision=state.revision;
     const saved=await api(`/jobs/${encodeURIComponent(control.dataset.id)}/generation-request`);
@@ -630,6 +656,7 @@ const actions={
     const {query_fusion,auto_explore,...draft}=restoreGenerationDraft(saved.request);
     generationPreferences.setQueryFusion(Boolean(query_fusion));
     generationPreferences.setAutoExplore(Boolean(auto_explore));
+    generationPreferences.setUseSubagents(saved.request.use_subagents === true);
     state.drafts.set(saved.request.course_id,draft);
     selectCourse(saved.request.course_id);
     modal.close();
@@ -637,7 +664,33 @@ const actions={
     go('generate');
   },
   'resume-generation':async control=>{const revision=state.revision;await api(`/jobs/${encodeURIComponent(control.dataset.id)}/resume`,'POST');if(revision!==state.revision)return;modal.close();notify('已继续生成，保留已完成的题目。中断的请求可能已计费。');go('progress',control.dataset.id);},
-  'approve-content':async()=>{const content=state.content;await api(`/contents/${encodeURIComponent(content.id)}/review`,'POST',{version:content.version,action:'approve'});notify('文字已确认，可以打开学习页或制作媒体。');await renderRoute();},
+  'open-partial':control=>go('partial',control.dataset.id),
+  'cancel-generation':async control=>{
+    const revision=state.revision;
+    await api(`/jobs/${encodeURIComponent(control.dataset.id)}/cancel`,'POST',{});
+    if(revision!==state.revision)return;
+    await renderRoute();
+  },
+  'revise-question':control=>{
+    const content=state.content, revision=state.revision;
+    if(!content)return;
+    const slotId=control.dataset.slotId;
+    dialog('修改此题',renderQuestionRevisionDialog(content,slotId));
+    const form=$('#question-revision-form',modal), close=$('.close-button',modal);
+    let pending=false;
+    const preventClose=event=>{if(pending)event.preventDefault();};
+    modal.addEventListener('cancel',preventClose);
+    const dispose=bindQuestionRevision(form,{
+      version:content.version,
+      isActive:()=>revision===state.revision && modal.open,
+      submit:payload=>api(`/contents/${encodeURIComponent(content.id)}/questions/${encodeURIComponent(slotId)}/revise`,'POST',payload),
+      pendingChanged:value=>{pending=value;if(close?.isConnected)close.disabled=value;},
+      onCreated:job=>{modal.close();go('progress',job.job_id);}
+    });
+    modal.addEventListener('close',()=>{dispose();modal.removeEventListener('cancel',preventClose);},{once:true});
+    $('[name="instruction"]',form).focus();
+  },
+  'approve-content':async()=>{const content=state.content,revision=state.revision;await api(`/contents/${encodeURIComponent(content.id)}/review`,'POST',{version:content.version,action:'approve'});if(revision!==state.revision)return;notify('文字已确认，可以打开学习页或制作媒体。');await renderRoute();},
   'export-content':()=>{
     const content=state.content;
     if(!content)return;
@@ -658,16 +711,17 @@ const actions={
   'edit-content':editContent,
   'cancel-edit':()=>{$('#edit-panel').innerHTML='';},
   'make-media':async control=>{const revision=state.revision,content=state.content;const job=await api(`/contents/${encodeURIComponent(content.id)}/media`,'POST',{version:content.version,kind:control.dataset.kind,request_key:crypto.randomUUID()});if(revision===state.revision)go('progress',job.job_id);},
-  'approve-media':async control=>{await api(`/media/${encodeURIComponent(control.dataset.id)}/approve`,'POST',{version:Number(control.dataset.version)});notify('媒体内容已确认。');await renderRoute();},
+  'approve-media':async control=>{const revision=state.revision;await api(`/media/${encodeURIComponent(control.dataset.id)}/approve`,'POST',{version:Number(control.dataset.version)});if(revision!==state.revision)return;notify('媒体内容已确认。');await renderRoute();},
   reveal:async()=>{state.reveal=true;await renderRoute();}
 };
 
 document.addEventListener('click',event=>{const control=event.target.closest('[data-action]');if(!control||!workspaceReady)return;const action=actions[control.dataset.action];if(action){event.preventDefault();busy(control,()=>action(control));}});
-document.addEventListener('pointerdown',()=>document.body.dataset.input='pointer',{capture:true,passive:true});
-document.addEventListener('keydown',()=>document.body.dataset.input='keyboard',{capture:true});
+const inputMode = mode => { if (document.body.dataset.input !== mode) document.body.dataset.input = mode; };
+document.addEventListener('pointerdown',()=>inputMode('pointer'),{capture:true,passive:true});
+document.addEventListener('keydown',()=>inputMode('keyboard'),{capture:true});
 $('.skip').onclick=event=>{event.preventDefault();$('#main').focus();$('#main').scrollIntoView({block:'start',behavior:'instant'});};
 $('#notice .notice-close').onclick=()=>$('#notice').hidden=true;
-$('#course-select').onchange=async()=>{if(!workspaceReady)return;selectCourse($('#course-select').value);state.content=null;if(state.route.page==='content')go('contents');else if(state.route.page==='progress')go('jobs');else await renderRoute();};
+$('#course-select').onchange=async()=>{if(!workspaceReady)return;selectCourse($('#course-select').value);state.content=null;if(state.route.page==='content')go('contents');else if(['progress','partial'].includes(state.route.page))go('jobs');else await renderRoute();};
 window.addEventListener('hashchange',()=>{if(captureRestoreLink()){restoreAttemptUser=null;checkSession({suspend:true});return;}renderRoute();});
 window.addEventListener('pagehide',()=>auth.suspend('checking'));
 window.addEventListener('pageshow',event=>{if(event.persisted)checkSession({suspend:true});});

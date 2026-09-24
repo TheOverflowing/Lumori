@@ -1,6 +1,6 @@
 # Lumori
 
-当前版本：**v0.2.0-ca1（2026-09-20）**。对应研究快照为 `lumori-fyp` 的 `ca1-2026-09-20` 标签。参阅 [CA1 变更](CHANGELOG.md)、[使用指南](docs/USER_GUIDE.md)和[内容导出](docs/CONTENT_EXPORTS.md)。
+当前版本：**v0.3.0（2026-09-24）**。对应研究快照为 `lumori-fyp` 的 `snapshot-2026-09-24` 标签。参阅 [版本变更](CHANGELOG.md)、[使用指南](docs/USER_GUIDE.md)和[内容导出](docs/CONTENT_EXPORTS.md)。
 
 用于教育内容与测评生成的 Web 应用。此仓库仅维护可部署的产品代码、运行配置和回归测试；实验报告、原始语料及论文材料保存在独立的私有研究仓库 `TheOverflowing/lumori-fyp`。
 
@@ -98,3 +98,7 @@ node --test tests/frontend_*.test.mjs
 ## CA1 运行边界
 
 默认使用 native Agent；可选 DeepSeek Harness 需另行安装并配置，不包含在标准 Docker 镜像内。新增功能包括逐题复核与续做、查询澄清、资料探索、版本评分及 Word/PDF 导出。自动测试是离线接口与规则验证，不代表人工认可或学习效果。当前版本的验证范围见 [CA1 validation](docs/CA1_VALIDATION_20260920.md)。
+
+## 2026-09-24 更新
+
+支持任务取消与恢复、部分结果、单题修改、生成资源限制、混合探索和界面性能改进。`/healthz` 检查数据库与后台工作线程是否可用，`/livez` 仅检查服务存活。本次验证见 [Validation](docs/VALIDATION_20260924.md)。

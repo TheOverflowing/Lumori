@@ -70,3 +70,18 @@ test('all Chinese interface string literals and static translation markers have 
   const html=readFileSync('app/static/index.html','utf8');
   for(const [,key] of html.matchAll(/data-i18n(?:-[\w-]+)?="([^"]+)"/g)) if(/[\u3400-\u9fff]/.test(key)) assert.ok(Object.hasOwn(english,key),key);
 });
+
+test('question revision preparation and version conflict errors have English copy',()=>{
+  const source=readFileSync('app/question_revision.py','utf8');
+  for(const [,key] of source.matchAll(/raise (?:ValueError|Conflict)\('([^']*[\u3400-\u9fff][^']*)'\)/g)) {
+    assert.ok(Object.hasOwn(english,key),`Question revision error needs translation: ${key}`);
+    assert.doesNotMatch(english[key],/[\u3400-\u9fff]/);
+  }
+  for(const key of [
+    '文字解析已完成；任务队列已满，可稍后继续处理图片。',
+    '当前账号等待或执行中的任务已达上限，请等待完成或取消部分任务。',
+    '当前账号等待或执行中的任务已达上限，请先等待完成或取消部分任务。',
+    '此任务没有可查看的部分内容。',
+    '任务已结束，无法取消。',
+  ]) assert.ok(Object.hasOwn(english,key),key);
+});

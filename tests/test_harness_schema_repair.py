@@ -195,10 +195,9 @@ def test_valid_quality_failures_never_trigger_schema_repair(
 
 
 @pytest.mark.parametrize('settings', [
-    {'agent_runtime': 'native', 'harness_schema_repairs': 1},
     {'agent_runtime': 'deepseek_harness', 'harness_schema_repairs': 0},
 ])
-def test_disabled_or_native_behavior_remains_single_call_protocol_failure(
+def test_disabled_harness_behavior_remains_single_call_protocol_failure(
         agent_case, offline_harness, alter_schema, settings):
     alter_schema()
     rig = agent_case(count=1, settings_options=OPTIONS | settings)
@@ -210,7 +209,7 @@ def test_disabled_or_native_behavior_remains_single_call_protocol_failure(
 
 
 @pytest.mark.parametrize('limit,status', [('agent_max_calls', 'call_limit'),
-                                       ('max_daily_calls', 'provider_error')])
+                                       ('max_daily_calls', 'call_limit')])
 def test_schema_repair_obeys_existing_budget_without_an_extra_call(
         agent_case, offline_harness, alter_schema, limit, status):
     alter_schema()

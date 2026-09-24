@@ -18,6 +18,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .providers import ProviderOutputError, safe_usage
+from .task_control import JobCancelled
 
 
 MAX_BODY_BYTES = 300_000
@@ -48,6 +49,7 @@ def _error(status, code):
         'request_too_large': 'The relay request exceeds the local size limit.',
         'request_limit': 'The relay request limit has been reached. No automatic retry is performed.',
         'scope_denied': 'This job is no longer authorized to call the model.',
+        'task_cancelled': 'This job was cancelled. No further model requests will be sent.',
         'provider_failed': 'The model request failed or returned an invalid response. No automatic retry is performed.',
     }
     return JSONResponse(status_code=status, content={'error': {'type': 'harness_relay_error',
@@ -396,6 +398,8 @@ def create_relay_app(providers, job_id, token, *, max_requests=6, max_output_tok
                         result = await result
                     if result is False:
                         return _error(403, 'scope_denied')
+                except JobCancelled:
+                    return _error(409, 'task_cancelled')
                 except Exception:
                     return _error(403, 'scope_denied')
             app.state.request_count += 1
@@ -419,6 +423,9 @@ def create_relay_app(providers, job_id, token, *, max_requests=6, max_output_tok
                                         validator=validate_response)
             data = _clean(data, secret_values())
             audit.update(status='succeeded', response=data)
+        except JobCancelled:
+            audit.update(status='cancelled', error_code='task_cancelled')
+            return _error(409, 'task_cancelled')
         except asyncio.CancelledError:
             audit.update(status='cancelled', error_code='request_interrupted')
             raise

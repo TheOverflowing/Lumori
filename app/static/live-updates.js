@@ -1,6 +1,6 @@
 /* One in-flight read per view. Disposed views never apply late responses. */
 export function watchResource({load, update, error = () => {}, interval = 3000, initial, visibility = document}) {
-  let stopped = false, timer, reading = false;
+  let stopped = false, timer, reading = false, controller;
   let previous = JSON.stringify(initial);
   const schedule = () => { if (!stopped) timer = setTimeout(tick, interval); };
   async function tick() {
@@ -8,8 +8,9 @@ export function watchResource({load, update, error = () => {}, interval = 3000, 
     clearTimeout(timer);
     if (visibility.hidden) { schedule(); return; }
     reading = true;
+    controller = new AbortController();
     try {
-      const value = await load();
+      const value = await load({signal:controller.signal});
       if (stopped) return;
       const next = JSON.stringify(value);
       if (next !== previous) { update(value); previous = next; }
@@ -20,5 +21,5 @@ export function watchResource({load, update, error = () => {}, interval = 3000, 
   const resume = () => { if (!visibility.hidden) tick(); };
   visibility.addEventListener('visibilitychange', resume);
   schedule();
-  return () => { stopped = true; clearTimeout(timer); visibility.removeEventListener('visibilitychange', resume); };
+  return () => { stopped = true; clearTimeout(timer); controller?.abort(); visibility.removeEventListener('visibilitychange', resume); };
 }

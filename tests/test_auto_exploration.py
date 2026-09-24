@@ -131,6 +131,85 @@ def test_no_documents_discovers_indexes_and_freezes_sources(rig):
     assert seen == before and len(pipeline.providers.calls) == model_calls
 
 
+def test_newly_indexed_source_gets_frozen_gap_recheck_before_first_job_stops(rig, monkeypatch, tmp_path):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import WhitespaceSplit
+
+    pipeline, request, job_id, seen, _ = rig
+    tokenizer = Tokenizer(WordLevel({'[UNK]': 0}, unk_token='[UNK]'))
+    tokenizer.pre_tokenizer = WhitespaceSplit()
+    tokenizer_path = tmp_path / 'tokenizer.json'; tokenizer.save(str(tokenizer_path))
+    pipeline.settings.rag_tokenizer_path = tokenizer_path
+    pipeline.settings.retrieval_context_tokens = 256
+    pipeline.settings.chunk_max_chars = 130
+    pipeline.settings.chunk_overlap_chars = 0
+    request = request.model_copy(update={'topic': 'machine learning introduction'})
+    pipeline.store.execute('UPDATE jobs SET payload=? WHERE id=?', (dumps(request.model_dump()), job_id))
+    intro = 'Machine learning uses examples and experience to improve a prediction task.'
+    categories = [
+        'Supervised learning trains from labeled examples to predict known targets.',
+        'Unsupervised learning finds patterns in data without provided labels.',
+        'Reinforcement learning trains agents using actions and rewards from an environment.',
+    ]
+    body = '<main>' + ''.join('<p>' + text + '</p>' for text in [intro, *categories]) + '</main>'
+
+    async def fetch(settings, url):
+        seen['fetch'].append(url)
+        return {'url': url, 'original_url': url, 'content_type': 'text/html',
+                'raw': body.encode(), 'storage_policy': 'open_license'}
+    monkeypatch.setattr(exploration.exploration_sources, 'fetch_source', fetch)
+
+    async def sparse_local(local_request, local_job_id, *, with_trace=False, _progress_stage='retrieval'):
+        document = pipeline.store.one("SELECT id FROM documents WHERE course_id=? AND status='ready'",
+                                      (local_request.course_id,))
+        if document:
+            rows = pipeline.store.document_chunks(document['id'])
+            source = next(row for row in rows if intro in row['text'])
+            return ([source], {'configuration': pipeline.retrieval_configuration(local_request),
+                               'selected_count': 1, 'selected': [{'id': source['id']}]})
+        return ([], {'configuration': pipeline.retrieval_configuration(local_request),
+                     'selected_count': 0, 'selected': []})
+    monkeypatch.setattr(pipeline, '_retrieve_local', sparse_local)
+
+    async def scripted(messages, current_job_id):
+        data = json.loads(messages[1]['content']); pipeline.providers.calls.append(data)
+        call_id = pipeline.store.reserve_call(current_job_id, 'text', 'fixture', pipeline.settings.max_daily_calls)
+        pipeline.store.execute("UPDATE calls SET status='succeeded' WHERE id=?", (call_id,))
+        if data['task'] == 'exploration_selection':
+            passage = next(part for part in data['passages'] if intro in part['text'])
+            return {'accept': True, 'reason_code': 'supports_gap',
+                    'supports': [{'gap_id': 'g1', 'passage_id': passage['id']}]}
+        passages = data['sources']
+        first = next((part for part in passages if intro in part['text']), None)
+        full = '\n'.join(part['text'] for part in passages)
+        complete = all(term in full for term in ('Supervised learning', 'Unsupervised learning',
+                                                  'Reinforcement learning'))
+        supports = ([{'passage_id': part['id']} for part in passages
+                     if any(term in part['text'] for term in ('Supervised learning', 'Unsupervised learning',
+                                                              'Reinforcement learning'))][:3] if complete else [])
+        return {'status': 'sufficient' if complete else 'missing_knowledge', 'requirements': [
+            {'id': 'g1', 'need': 'a basic machine learning definition', 'covered': first is not None,
+             'supports': [{'passage_id': first['id']}] if first else [],
+             'queries': [] if first else [{'query': 'machine learning examples definition', 'language': 'en'},
+                                          {'query': '机器学习 定义 例子', 'language': 'zh'}]},
+            {'id': 'g2', 'need': 'supervised unsupervised and reinforcement learning categories',
+             'covered': complete, 'supports': supports,
+             'queries': [] if complete else [{'query': 'supervised unsupervised reinforcement learning', 'language': 'en'},
+                                              {'query': '监督学习 无监督学习 强化学习', 'language': 'zh'}]},
+        ]}
+    monkeypatch.setattr(pipeline.providers, 'generate', scripted)
+
+    selected, trace = asyncio.run(pipeline.retrieve(request, job_id, with_trace=True))
+
+    assert selected and trace['exploration']['reason'] == 'sources_sufficient'
+    assert len(seen['fetch']) == 1
+    assert trace['gap_context']['targeted_included_leaf_count'] >= 2
+    assert len(trace['exploration']['assessments']) == 3
+    assert [entry['status'] for entry in trace['exploration']['assessments']] == [
+        'missing_knowledge', 'missing_knowledge', 'sufficient']
+
+
 def test_local_sufficient_never_searches(rig):
     did = seed(rig[0])
     selected, trace = run(rig)
@@ -140,15 +219,15 @@ def test_local_sufficient_never_searches(rig):
     assert trace['exploration']['search_audit'] == []
 
 
-def test_empty_directory_results_have_scoped_failure_and_query_audit(rig):
+def test_empty_hybrid_results_have_scoped_failure_and_query_audit(rig):
     pipeline, _, _, seen, candidates = rig
     candidates.clear()
     selected, trace = run(rig)
     audit = trace['exploration']['search_audit']
     assert selected == [] and trace['exploration']['reason'] == 'no_search_results'
-    assert '目录覆盖有限' in exploration.failure_message(trace)
+    assert '课程目录与百科搜索' in exploration.failure_message(trace)
     assert '并不代表网上没有相关资料' in exploration.failure_message(trace)
-    assert audit == [{'round': 1, **query, 'provider': 'curated', 'status': 'succeeded',
+    assert audit == [{'round': 1, **query, 'provider': 'hybrid', 'status': 'succeeded',
         'candidate_count': 0, 'candidates': []} for query in missing()['requirements'][0]['queries']]
     state = json.loads(pipeline.store.one('SELECT state FROM exploration_runs')['state'])
     assert state['search_audit'] == audit
@@ -642,6 +721,21 @@ def test_external_markdown_code_templates_and_images_remain_unavailable_evidence
     parsed = asyncio.run(exploration._parsed(rig[0], {'content_type': 'text/plain', 'raw': raw}, {'title': 'Raw chapter'}))
     assert parsed.status == 'needs_review'
     assert parsed.pages[0].warnings == ['markdown_external_content_not_fetched']
+
+
+def test_long_public_article_indexes_relevant_literal_excerpt_with_warning(rig):
+    filler = '<p>Background chronology and unrelated names. ' + ('ordinary detail ' * 20) + '</p>'
+    target = '<p>Quantum coherence explains the interference of superposed states.</p>'
+    raw = ('<html><body><main>' + filler * 150 + target + '</main></body></html>').encode()
+    gaps = [{'id': 'g1', 'need': 'quantum coherence',
+             'queries': [{'query': 'quantum coherence', 'language': 'en'}]}]
+    parsed = asyncio.run(exploration._parsed(rig[0],
+        {'content_type': 'text/html', 'raw': raw},
+        {'title': 'Quantum article', 'provider': 'wikipedia'}, gaps))
+    assert len(parsed.pages[0].text) <= exploration.MAX_BODY_CHARS
+    assert 'Quantum coherence explains the interference' in parsed.pages[0].text
+    assert parsed.strategy == 'visible_html_relevance_excerpt_v1'
+    assert 'web_relevance_excerpt_v1' in parsed.warnings
 
 
 def test_external_provenance_survives_mineru_reparse_and_reindex(rig, monkeypatch):

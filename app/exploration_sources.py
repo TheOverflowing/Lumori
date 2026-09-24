@@ -2,6 +2,7 @@
 
 ``curated`` searches a small *local catalog of real URLs*, not a live web index.
 The bilingual aliases are discovery hints, never evidence of source relevance.
+``hybrid`` adds bounded Wikipedia article search after the reviewed catalog.
 ``brave`` uses the documented Web Search API; snippets are likewise hints only.
 No downloaded content is executed and this module never writes to the database.
 
@@ -26,9 +27,12 @@ from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 import httpx
 
 
-CATALOG_VERSION = 'cs-public-sources-20260920-v3'
+CATALOG_VERSION = 'public-course-sources-20260923-v4'
 BRAVE_ENDPOINT = 'https://api.search.brave.com/res/v1/web/search'
 BRAVE_DOCUMENTATION = 'https://api-dashboard.search.brave.com/app/documentation/web-search'
+WIKIMEDIA_ENDPOINTS = {'en': 'https://en.wikipedia.org/w/api.php',
+                       'zh': 'https://zh.wikipedia.org/w/api.php'}
+WIKIMEDIA_USER_AGENT = 'LumoriFYP/0.1 (https://github.com/TheOverflowing)'
 DOH_ENDPOINT = 'https://1.1.1.1/dns-query'
 DNS_POLICY_VERSION = 'public_address_pinning_v2'
 MAX_REDIRECTS = 4
@@ -141,6 +145,16 @@ CATALOG = tuple(
            ('python', 'python list', 'python dictionary', 'python列表', 'python字典', '列表推导式'), language='zh',
            attribution='Python Software Foundation and translators', license='Python documentation license (PSF)',
            license_url='https://docs.python.org/3/license.html'),
+    # This exact LibreTexts page declares CC BY 4.0 and includes the rule,
+    # conditions, worked examples, and other indeterminate forms. OpenStax's
+    # calculus book has an explicit AI-ingestion restriction, so it is not used.
+    _entry("https://math.libretexts.org/Bookshelves/Calculus/Supplemental_Modules_(Calculus)/Integral_Calculus/3:_L'Hopital's_Rule_and_Improper_Integrals/3.2:_L'Hopital's_Rule",
+           "Mathematics LibreTexts: L'Hôpital's Rule",
+           ("L'Hôpital's rule", "L'Hopital's rule", "L'Hospital's rule",
+            "L'Hôpital", "L'Hopital", "L'Hospital", 'l hospital rule',
+            '洛必达法则', '洛必達法則', '洛必达', '洛必達', '罗必达'),
+           attribution='Larry Green / Mathematics LibreTexts', license='CC BY 4.0',
+           license_url='https://creativecommons.org/licenses/by/4.0/'),
     _entry('https://developers.google.com/machine-learning/intro-to-ml/what-is-ml',
            'Google: What is machine learning?',
            ('machine learning', 'supervised learning', 'unsupervised learning', 'reinforcement learning',
@@ -293,7 +307,11 @@ def _clean_text(value, limit=600):
 
 
 def _discovery_text(value: str) -> str:
-    value = unicodedata.normalize('NFKC', value).casefold()
+    # Search aliases are not citations: normalize accent and apostrophe variants
+    # so L'Hôpital, L’Hopital and l'Hopital resolve to the same catalog topic.
+    value = ''.join(character for character in unicodedata.normalize('NFKD', value.casefold())
+                    if not unicodedata.combining(character))
+    value = re.sub(r"['\u2018\u2019\u02bc]", '', value)
     return re.sub(r'\s+', ' ', re.sub(r'[-_\u2010-\u2015]+', ' ', value)).strip()
 
 
@@ -362,12 +380,82 @@ async def search(settings, query: str, language: str = 'en', limit: int = 8) -> 
     if not isinstance(query, str) or not query.strip() or len(query) > 600 or len(query.split()) > 75:
         raise SearchUnavailable('invalid_query')
     limit = max(1, min(int(limit), 20))
-    provider = getattr(settings, 'exploration_search_provider', 'curated')
+    provider = getattr(settings, 'exploration_search_provider', 'hybrid')
     if provider == 'curated':
         return _curated_search(query, language, limit)
+    if provider == 'hybrid':
+        # Preserve most slots for reviewed course pages while supplying at most
+        # two article candidates for concepts absent from the finite catalog.
+        curated = _curated_search(query, language, max(1, limit - 2))
+        try:
+            public = await _wikimedia_search(settings, query, language, min(2, limit - len(curated)))
+        except SearchUnavailable:
+            if not curated:
+                raise
+            public = []
+        seen = {item['url'] for item in curated}
+        return curated + [item for item in public if item['url'] not in seen][:limit - len(curated)]
     if provider != 'brave' or not getattr(settings, 'exploration_search_api_key', ''):
         raise SearchUnavailable('search_not_configured')
     return await _brave_search(settings, query, language, limit)
+
+
+async def _wikimedia_search(settings, query, language, limit):
+    if limit <= 0:
+        return []
+    wiki_language = 'zh' if language.startswith('zh') else 'en'
+    endpoint = WIKIMEDIA_ENDPOINTS[wiki_language]
+    params = {'action': 'query', 'list': 'search', 'srsearch': query,
+              'srnamespace': '0', 'srlimit': limit, 'srprop': 'snippet',
+              'format': 'json', 'formatversion': '2', 'maxlag': '2'}
+    headers = {'Accept': 'application/json', 'User-Agent': WIKIMEDIA_USER_AGENT}
+    try:
+        # Do not stall every query for the full document-download timeout when
+        # Wikimedia is unreachable from a particular deployment region.
+        timeout = min(8.0, max(1.0, float(getattr(settings, 'exploration_fetch_timeout', 20))))
+        async with asyncio.timeout(timeout):
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, trust_env=False) as client:
+                async with client.stream('GET', endpoint, headers=headers, params=params) as response:
+                    if response.status_code == 429:
+                        raise SearchUnavailable('search_rate_limited')
+                    if response.status_code != 200:
+                        raise SearchUnavailable()
+                    raw = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        if len(raw) + len(chunk) > 1024 * 1024:
+                            raise SearchUnavailable('search_invalid_response')
+                        raw.extend(chunk)
+        payload = json.loads(raw)
+        if not isinstance(payload, dict) or payload.get('error'):
+            raise SearchUnavailable('search_invalid_response')
+        rows = payload.get('query', {}).get('search', [])
+        if not isinstance(rows, list):
+            raise SearchUnavailable('search_invalid_response')
+        results, seen = [], set()
+        for row in rows[:limit]:
+            if not isinstance(row, dict) or row.get('ns') != 0 or type(row.get('pageid')) is not int:
+                continue
+            title = row.get('title')
+            if (not isinstance(title, str) or not 1 <= len(title) <= 200
+                    or any(ord(c) < 32 for c in title) or '(disambiguation)' in title.casefold()):
+                continue
+            try:
+                url = _validate_url('https://' + wiki_language + '.wikipedia.org/wiki/'
+                    + quote(title.replace(' ', '_'), safe='')).url
+            except SourceRejected:
+                continue
+            if url in seen:
+                continue
+            seen.add(url)
+            results.append({'url': url, 'title': title,
+                            'snippet': _clean_text(row.get('snippet')),
+                            'provider': 'wikipedia', 'language': wiki_language,
+                            'storage_policy': 'unknown'})
+        return results
+    except SearchUnavailable:
+        raise
+    except (httpx.HTTPError, TimeoutError, ValueError, TypeError, AttributeError):
+        raise SearchUnavailable() from None
 
 
 async def _brave_search(settings, query, language, limit):

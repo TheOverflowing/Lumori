@@ -41,6 +41,7 @@ class ApiProviders:
     async def close(self): await self.client.aclose()
 
     async def call(self, capability, payload, job_id, binary=False, validator=None):
+        self.store.check_cancelled(job_id)
         ep=getattr(self.settings,capability)
         ep.require(capability)
         reserved={'model','messages','input','prompt','voice','n','encoding_format','response_format','stream',

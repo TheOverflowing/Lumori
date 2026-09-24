@@ -27,6 +27,7 @@ TIMELINE_LIMIT = 40
 _MANIFEST_FIELDS = {'schema', 'job_id', 'data_dir', 'course_id',
                     'enforce_account_ownership', 'owner_id', 'sources', 'audit_path'}
 _MESSAGES = {
+    'task_cancelled': 'This job was cancelled. No further teaching tools will run.',
     'scope_denied': 'This job or its reference documents are no longer available in the authorized scope.',
     'invalid_input': 'Invalid cpu_schedule_v1 input; follow the published tool schema.',
     'unavailable': 'The teaching tool is temporarily unavailable.',
@@ -43,6 +44,10 @@ def _json_copy(value):
 
 
 class _ScopeDenied(Exception):
+    pass
+
+
+class _TaskCancelled(Exception):
     pass
 
 
@@ -114,20 +119,23 @@ class ScopedTeachingTools:
         except (OSError, ValueError, TypeError, AttributeError, RecursionError):
             raise ValueError('Invalid teaching tools manifest.') from None
 
-    def _check_scope(self):
+    def _check_scope(self, *, allow_cancelled=False):
         """One read-only SQLite snapshot; no migrations or arbitrary queries."""
         m = self._manifest
         with closing(sqlite3.connect(self._db_path.as_uri() + '?mode=ro', uri=True, timeout=5)) as db:
             db.row_factory = sqlite3.Row
             db.execute('BEGIN')
-            row = db.execute('''SELECT j.kind,j.payload,jo.user_id AS job_owner,
+            row = db.execute('''SELECT j.kind,j.payload,j.status,jc.cancel_requested_at,jo.user_id AS job_owner,
                 co.user_id AS course_owner FROM jobs j
                 LEFT JOIN job_owners jo ON jo.job_id=j.id
+                LEFT JOIN job_controls jc ON jc.job_id=j.id
                 JOIN courses c ON c.id=?
                 LEFT JOIN course_owners co ON co.course_id=c.id WHERE j.id=?''',
                 (m['course_id'], m['job_id'])).fetchone()
-            if not row or row['kind'] != 'generate':
+            if not row or row['kind'] not in ('generate', 'revise_question'):
                 raise _ScopeDenied
+            if not allow_cancelled and (row['status']=='cancelled' or row['cancel_requested_at']):
+                raise _TaskCancelled
             payload = json.loads(row['payload'])
             if type(payload) is not dict or payload.get('course_id') != m['course_id']:
                 raise _ScopeDenied
@@ -177,6 +185,8 @@ class ScopedTeachingTools:
     def _call(self, name, payload, compute):
         try:
             self._check_scope()
+        except _TaskCancelled:
+            result = _error('task_cancelled')
         except _ScopeDenied:
             result = _error('scope_denied')
         except Exception:

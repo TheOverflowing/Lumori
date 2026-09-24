@@ -33,7 +33,7 @@ def main():
         def healthy():
             for _ in range(60):
                 try:
-                    assert request('/healthz') == {'status':'ok'}
+                    assert request('/healthz') == {'status':'ok','ready':True,'database':True,'workers':True}
                     return
                 except Exception:
                     time.sleep(1)

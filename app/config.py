@@ -81,7 +81,7 @@ class Settings:
     document_parse_timeout: float = 120
     max_daily_calls: int = 100
     exploration_enabled: bool = True
-    exploration_search_provider: str = 'curated'
+    exploration_search_provider: str = 'hybrid'
     exploration_dns_mode: str = 'auto'
     exploration_search_api_key: str = field(default='', repr=False)
     exploration_max_rounds: int = 2
@@ -104,6 +104,8 @@ class Settings:
     # Experimental bounded supervisor planning; sequential_v1 preserves existing behavior.
     agent_orchestration: str = 'sequential_v1'
     agent_plan_batch_size: int = 8
+    # Bounded across question workers within one generation job.
+    agent_max_parallel_questions: int = 20
     # Explicit experimental specialization; never infer a course from keywords.
     agent_question_spec: str = 'none'
     harness_python: Path = ROOT / '.venv-harness/bin/python'
@@ -115,6 +117,7 @@ class Settings:
     harness_response_format: str = 'text'
     harness_schema_repairs: int = 0
     workers: int = 2
+    max_pending_jobs_per_account: int = 8
     auth_cookie_name: str = 'fyp_session'
     auth_cookie_secure: bool = False
     auth_session_hours: int = 168
@@ -169,7 +172,7 @@ class Settings:
                    chunk_overlap_chars=int(os.getenv('CHUNK_OVERLAP_CHARS', '120')),
                    max_daily_calls=max(1, int(os.getenv('MAX_DAILY_API_CALLS', '100'))),
                    exploration_enabled=os.getenv('EXPLORATION_ENABLED','true').lower() in ('true','1','yes'),
-                   exploration_search_provider=os.getenv('EXPLORATION_SEARCH_PROVIDER','curated'),
+                   exploration_search_provider=os.getenv('EXPLORATION_SEARCH_PROVIDER','hybrid'),
                    exploration_dns_mode=os.getenv('EXPLORATION_DNS_MODE','auto'),
                    exploration_search_api_key=os.getenv('EXPLORATION_SEARCH_API_KEY',''),
                    exploration_max_rounds=max(1,min(3,int(os.getenv('EXPLORATION_MAX_ROUNDS','2')))),
@@ -189,6 +192,7 @@ class Settings:
                    agent_runtime=os.getenv('AGENT_RUNTIME', 'native'),
                    agent_orchestration=os.getenv('AGENT_ORCHESTRATION', 'sequential_v1'),
                    agent_plan_batch_size=max(1, min(10, int(os.getenv('AGENT_PLAN_BATCH_SIZE', '8')))),
+                   agent_max_parallel_questions=max(1, min(40, int(os.getenv('AGENT_MAX_PARALLEL_QUESTIONS', '20')))),
                    agent_question_spec=os.getenv('AGENT_QUESTION_SPEC', 'none'),
                    harness_python=Path(os.getenv('HARNESS_PYTHON', str(ROOT/'.venv-harness/bin/python'))),
                    harness_executable=Path(os.getenv('HARNESS_EXECUTABLE', str(ROOT/'.venv-harness/bin/dsh'))),
@@ -198,6 +202,7 @@ class Settings:
                    harness_reasoning_effort=os.getenv('HARNESS_REASONING_EFFORT', 'off'),
                    harness_response_format=os.getenv('HARNESS_RESPONSE_FORMAT', 'text'),
                    harness_schema_repairs=max(0, min(1, int(os.getenv('HARNESS_SCHEMA_REPAIRS', '0')))),
+                   max_pending_jobs_per_account=max(1, min(100, int(os.getenv('MAX_PENDING_JOBS_PER_ACCOUNT', '8')))),
                    document_ocr_engine=os.getenv('DOCUMENT_OCR_ENGINE', 'tesseract'),
                    document_ocr_languages=os.getenv('DOCUMENT_OCR_LANGUAGES', 'chi_sim+eng'),
                    document_ocr_max_pages=max(0, int(os.getenv('DOCUMENT_OCR_MAX_PAGES', '30'))),

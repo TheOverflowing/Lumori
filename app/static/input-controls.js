@@ -6,19 +6,29 @@ let labelSequence = 0;
 export function mountInputControls(root) {
   const steppers = new Map();
   const textareas = new Set();
+  const dirty = new Set();
+  const values = new WeakMap();
   let frame = 0;
   let disposed = false;
 
-  function sizeTextarea(input) {
-    if (!input.getClientRects().length) return;
-    const style = getComputedStyle(input);
-    const border = parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
-    const padding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
-    input.style.height = '0px';
-    const natural = input.scrollHeight + (style.boxSizing === 'border-box' ? border : -padding);
-    const maximum = parseFloat(style.maxHeight) || Infinity;
-    input.style.height = `${Math.min(maximum, Math.max(parseFloat(style.minHeight) || 0, natural))}px`;
-    input.style.overflowY = natural > maximum ? 'auto' : 'hidden';
+  function sizeTextareas() {
+    const measuring = [...dirty].filter(input => input.getClientRects().length).map(input => {
+      const style = getComputedStyle(input);
+      const border = parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
+      const padding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+      return {input, adjustment:style.boxSizing === 'border-box' ? border : -padding,
+        minimum:parseFloat(style.minHeight) || 0, maximum:parseFloat(style.maxHeight) || Infinity};
+    });
+    // Batch writes, then measurements, then final writes. Never alternate a
+    // layout-invalidating height write and forced measurement for every field.
+    for (const {input} of measuring) input.style.height = '0px';
+    const heights = measuring.map(item => item.input.scrollHeight + item.adjustment);
+    measuring.forEach(({input, minimum, maximum}, index) => {
+      input.style.height = `${Math.min(maximum, Math.max(minimum, heights[index]))}px`;
+      input.style.overflowY = heights[index] > maximum ? 'auto' : 'hidden';
+      values.set(input, input.value);
+      dirty.delete(input);
+    });
   }
 
   function syncStepper(input, controls) {
@@ -67,7 +77,7 @@ export function mountInputControls(root) {
     steppers.set(input, {buttons, label});
   }
 
-  function refresh() {
+  function refresh(force = true) {
     if (disposed) return;
     for (const input of root.querySelectorAll('input[type="number"]')) {
       if (!steppers.has(input)) addStepper(input);
@@ -82,20 +92,22 @@ export function mountInputControls(root) {
         textareas.add(input);
         observer.observe(input);
       }
-      sizeTextarea(input);
+      if (force || values.get(input) !== input.value) dirty.add(input);
     }
     for (const input of textareas) {
-      if (!root.contains(input)) { observer.unobserve(input); textareas.delete(input); }
+      if (!root.contains(input)) { observer.unobserve(input); textareas.delete(input); dirty.delete(input); }
     }
+    sizeTextareas();
   }
 
   function schedule() {
-    if (!frame && !disposed) frame = requestAnimationFrame(() => { frame = 0; refresh(); });
+    if (!frame && !disposed) frame = requestAnimationFrame(() => { frame = 0; refresh(false); });
   }
   const widths = new WeakMap();
   const observer = new ResizeObserver(entries => {
     for (const {target, contentRect} of entries) {
       if (widths.get(target) !== contentRect.width) {
+        if (widths.has(target)) dirty.add(target);
         widths.set(target, contentRect.width);
         schedule();
       }

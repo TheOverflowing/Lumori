@@ -5,12 +5,16 @@ establish a model's ability to judge a humanities argument or educational qualit
 """
 import copy
 import json
+import asyncio
+import re
 
 import httpx
 import pytest
 
 from app.cpu_problem_spec import compile_cpu_spec
 from app.generation_agent import GenerationAgent, authorize_resume, fingerprint
+from app import generation_agent
+from app.models import GenerateRequest
 from app.providers import ProviderError
 from app.store import dumps
 from test_cpu_spec_agent import SPEC
@@ -87,6 +91,8 @@ def flexible_wire(monkeypatch):
                 'explanation': 'Check the stated objectives without assuming the author conclusion.',
                 'requires_calculation': True,
                 'tool_requests': [copy.deepcopy(t['request']) for t in compiled['evidence']['tool_results']]}
+            if 'question_checks' in contract['schema']['properties']:
+                value['question_checks'] = {'condition_issues': [], 'option_checks': []}
             if options.get('solver_mutation'):
                 options['solver_mutation'](value, contract, self.stage_counts[(task, position)])
             return self.response(value)
@@ -127,6 +133,202 @@ def flexible_case(agent_case, *, cpu=False, **kwargs):
                 'agent_question_spec': 'cpu_schedule_v1' if cpu else 'none', 'agent_max_repairs': 0}
     settings.update(kwargs.pop('settings_options', {}))
     return agent_case(settings_options=settings, **kwargs)
+
+
+@pytest.mark.parametrize('material', ['quiz', 'assignment'])
+def test_request_opt_in_runs_native_per_question_workers(agent_case, flexible_wire, material):
+    rig = agent_case(count=2, include_explanations=False, settings_options={'agent_runtime': 'native',
+                     'agent_orchestration': 'sequential_v1'})
+    payload = json.loads(rig.job()['payload']) | {'material': material, 'use_subagents': True}
+    rig.store.execute('UPDATE jobs SET payload=? WHERE id=?', (dumps(payload), rig.job_id))
+
+    assert rig.run()['status'] == 'succeeded', rig.job()
+    evidence = rig.evidence()
+    assert evidence['configuration']['orchestration']['mode'] == 'supervisor_v2'
+    assert evidence['configuration']['orchestration']['dispatch'] == 'bounded_parallel_workers_v1'
+    assert evidence['configuration']['orchestration']['max_parallel_questions'] == 20
+    assert [slot['worker']['status'] for slot in evidence['agent']['slots']] == ['completed'] * 2
+    assert rig.asset()['questions'] == [slot['accepted_asset']['questions'][0]
+                                      for slot in evidence['agent']['slots']]
+    assert rig.asset()['sections'] == []
+    assert [entry['task'] for entry in rig.wire.contracts].count('agent_plan') == 1
+    assert rig.text_call_count() == 7
+
+
+@pytest.mark.parametrize('limit,count', [(1, 3), (2, 3), (3, 3), (4, 4), (20, 40), (40, 40)])
+def test_opt_in_question_workers_overlap_only_up_to_limit(agent_case, flexible_wire, limit, count):
+    rig = agent_case(count=count, include_explanations=False, settings_options={
+        'agent_runtime': 'native', 'agent_orchestration': 'sequential_v1',
+        'agent_max_parallel_questions': limit})
+    payload = json.loads(rig.job()['payload']) | {'material': 'quiz', 'use_subagents': True}
+    rig.store.execute('UPDATE jobs SET payload=? WHERE id=?', (dumps(payload), rig.job_id))
+    original = rig.providers.generate
+    in_flight = peak = 0
+
+    async def observed(messages, job_id):
+        nonlocal in_flight, peak
+        contract = json.loads(messages[1]['content'])
+        if contract['task'] == 'agent_plan':
+            return await original(messages, job_id)
+        in_flight += 1
+        peak = max(peak, in_flight)
+        try:
+            await asyncio.sleep(0.01)
+            return await original(messages, job_id)
+        finally:
+            in_flight -= 1
+
+    rig.providers.generate = observed
+    assert rig.run()['status'] == 'succeeded', rig.job()
+    assert peak == limit
+    assert rig.text_call_count() == (count + rig.settings.agent_plan_batch_size - 1) // rig.settings.agent_plan_batch_size + 3 * count
+    assert [q['slot_id'] for q in rig.asset()['questions']] == [f'q{n}' for n in range(1, count + 1)]
+    assert rig.evidence()['configuration']['orchestration']['max_parallel_questions'] == limit
+
+
+def test_parallel_failure_stops_new_dispatch_but_keeps_sibling_checkpoint(agent_case, flexible_wire):
+    rig = agent_case(count=3, include_explanations=False,
+        wire_options={'fail_phase': ('agent_author', 1)}, settings_options={
+        'agent_runtime': 'native', 'agent_max_parallel_questions': 2})
+    payload = json.loads(rig.job()['payload']) | {'material': 'quiz', 'use_subagents': True}
+    rig.store.execute('UPDATE jobs SET payload=? WHERE id=?', (dumps(payload), rig.job_id))
+    original = rig.providers.generate
+
+    async def delayed_second(messages, job_id):
+        contract = json.loads(messages[1]['content'])
+        if contract['task'] == 'agent_author' and contract['set_position'] == 2:
+            await asyncio.sleep(0.03)
+        return await original(messages, job_id)
+
+    rig.providers.generate = delayed_second
+    assert rig.run()['status'] == 'failed'
+    assert not rig.contents()
+    slots = rig.evidence()['agent']['slots']
+    assert slots[0]['status'] != 'passed'
+    assert slots[1]['status'] == 'passed'
+    assert slots[2]['status'] == 'pending'
+    assert not any(c.get('set_position') == 3 for c in rig.wire.contracts)
+
+
+def test_sibling_failure_does_not_block_inflight_workers_own_repair(agent_case, flexible_wire):
+    rig = agent_case(count=3, include_explanations=False,
+        wire_options={'fail_phase': ('agent_author', 1)}, settings_options={
+        'agent_runtime': 'native', 'agent_max_parallel_questions': 2})
+    payload = json.loads(rig.job()['payload']) | {'material': 'quiz', 'use_subagents': True}
+    rig.store.execute('UPDATE jobs SET payload=? WHERE id=?', (dumps(payload), rig.job_id))
+    author_count = 0
+
+    def first_second_author_invalid(value, contract):
+        nonlocal author_count
+        if contract['set_position'] == 2:
+            author_count += 1
+            if author_count == 1:
+                value['questions'][0]['answer'] = ''
+
+    flexible_wire['author_mutation'] = first_second_author_invalid
+    original = rig.providers.generate
+
+    async def delayed_second(messages, job_id):
+        contract = json.loads(messages[1]['content'])
+        if contract['task'] == 'agent_author' and contract['set_position'] == 2:
+            await asyncio.sleep(0.02)
+        return await original(messages, job_id)
+
+    rig.providers.generate = delayed_second
+    assert rig.run()['status'] == 'failed'
+    slots = rig.evidence()['agent']['slots']
+    assert slots[1]['status'] == 'passed'
+    assert [a['status'] for a in slots[1]['attempts']] == ['rejected', 'passed']
+    assert slots[2]['status'] == 'pending'
+
+
+def test_research_full_exposure_can_finish_all_slots_without_partial_publish(agent_case, flexible_wire, monkeypatch):
+    monkeypatch.setattr(GenerationAgent, 'continue_after_worker_failure', True, raising=False)
+    rig = agent_case(count=3, include_explanations=False,
+        wire_options={'fail_phase': ('agent_author', 1)}, settings_options={
+        'agent_runtime': 'native', 'agent_max_parallel_questions': 2})
+    payload = json.loads(rig.job()['payload']) | {'material': 'quiz', 'use_subagents': True}
+    rig.store.execute('UPDATE jobs SET payload=? WHERE id=?', (dumps(payload), rig.job_id))
+    assert rig.run()['status'] == 'failed'
+    assert not rig.contents()
+    assert [slot['status'] for slot in rig.evidence()['agent']['slots']] == ['pending', 'passed', 'passed']
+
+
+def test_existing_serial_opt_in_checkpoint_resumes_without_parallel_conversion(agent_case, flexible_wire):
+    rig = agent_case(count=2, include_explanations=False,
+        wire_options={'fail_phase': ('agent_author', 1)}, settings_options={
+        'agent_runtime': 'native', 'agent_max_parallel_questions': 3})
+    payload = json.loads(rig.job()['payload']) | {'material': 'quiz', 'use_subagents': True}
+    rig.store.execute('UPDATE jobs SET payload=? WHERE id=?', (dumps(payload), rig.job_id))
+    assert rig.run()['status'] == 'failed'
+    evidence = rig.evidence()
+    evidence['configuration']['orchestration']['dispatch'] = 'serial_isolated_workers'
+    evidence['configuration']['orchestration'].pop('max_parallel_questions')
+    rig.store.save_job_evidence(rig.job_id, evidence)
+    authorize_resume(rig.store, rig.job_id)
+    assert rig.run()['status'] == 'succeeded', rig.job()
+    assert rig.evidence()['configuration']['orchestration']['dispatch'] == 'serial_isolated_workers'
+    assert [q['slot_id'] for q in rig.asset()['questions']] == ['q1', 'q2']
+
+
+def test_existing_parallel_checkpoint_keeps_frozen_limit_after_default_changes(agent_case, flexible_wire):
+    rig = agent_case(count=3, include_explanations=False,
+        wire_options={'fail_phase': ('agent_author', 1)}, settings_options={
+        'agent_runtime': 'native', 'agent_max_parallel_questions': 4})
+    payload = json.loads(rig.job()['payload']) | {'material': 'quiz', 'use_subagents': True}
+    rig.store.execute('UPDATE jobs SET payload=? WHERE id=?', (dumps(payload), rig.job_id))
+    assert rig.run()['status'] == 'failed'
+    assert rig.evidence()['configuration']['orchestration']['max_parallel_questions'] == 4
+
+    rig.settings.agent_max_parallel_questions = 20
+    authorize_resume(rig.store, rig.job_id)
+    assert rig.run()['status'] == 'succeeded', rig.job()
+    assert rig.evidence()['configuration']['orchestration']['max_parallel_questions'] == 4
+    assert [q['slot_id'] for q in rig.asset()['questions']] == ['q1', 'q2', 'q3']
+
+
+def test_parallel_late_duplicate_is_rejected_before_assembly(agent_case, flexible_wire, monkeypatch):
+    rig = agent_case(count=2, include_explanations=False, settings_options={
+        'agent_runtime': 'native', 'agent_max_parallel_questions': 2})
+    payload = json.loads(rig.job()['payload']) | {'material': 'quiz', 'use_subagents': True}
+    rig.store.execute('UPDATE jobs SET payload=? WHERE id=?', (dumps(payload), rig.job_id))
+    normalize = generation_agent.normalized_stem
+    monkeypatch.setattr(generation_agent, 'normalized_stem',
+        lambda stem: normalize(re.sub(r'Fixture \d+\.', '', stem)))
+    original = rig.providers.generate
+
+    async def delay_second_review(messages, job_id):
+        contract = json.loads(messages[1]['content'])
+        if contract['task'] == 'agent_review' and AgentWire.identity(contract)[0] == 2:
+            await asyncio.sleep(0.03)
+        return await original(messages, job_id)
+
+    rig.providers.generate = delay_second_review
+    assert rig.run()['status'] == 'failed'
+    assert not rig.contents()
+    slots = rig.evidence()['agent']['slots']
+    assert slots[0]['status'] == 'passed'
+    assert slots[1]['status'] == 'failed'
+    assert any('duplicate_question' in a.get('feedback', {}).get('issues', [])
+               for a in slots[1]['attempts'])
+
+
+def test_request_opt_out_overrides_server_supervisor(agent_case):
+    rig = agent_case(count=1, settings_options={'agent_runtime': 'native',
+                     'agent_orchestration': 'supervisor_v2'})
+    payload = json.loads(rig.job()['payload']) | {'use_subagents': False}
+    rig.store.execute('UPDATE jobs SET payload=? WHERE id=?', (dumps(payload), rig.job_id))
+
+    assert rig.run()['status'] == 'succeeded', rig.job()
+    assert 'orchestration' not in rig.evidence()['configuration']
+    assert not any(entry['task'] == 'agent_plan' for entry in rig.wire.contracts)
+    assert rig.text_call_count() == 3
+
+
+def test_lesson_rejects_per_question_workers():
+    with pytest.raises(ValueError, match='逐题子代理'):
+        GenerateRequest(course_id='course-1', topic='Course evidence', material='lesson',
+                        request_key='lesson-subagents', use_subagents=True)
 
 
 def test_defensible_nonidentical_answers_are_not_rejected_by_string_matching(
@@ -534,7 +736,7 @@ def test_valid_negative_requirement_is_quality_failure_without_evidence_repair(
     assert not rig.contents()
 
 
-@pytest.mark.parametrize('limit,status', [('agent_max_calls', 'call_limit'), ('max_daily_calls', 'provider_error')])
+@pytest.mark.parametrize('limit,status', [('agent_max_calls', 'call_limit'), ('max_daily_calls', 'call_limit')])
 def test_evidence_repair_respects_shared_budget_before_any_extra_request(
         agent_case, offline_harness, flexible_wire, limit, status):
     flexible_wire['review_mutation'] = wrong_solver_quote_once

@@ -97,9 +97,9 @@ Expand the original-request section to see your learning objective. Enter up to 
 
 If you do not know, choose **Not sure — use original request**. Unresolved conditions may lead to a conditional explanation or insufficient-evidence feedback. Before submitting, cancel or press Escape to return to the original form. If the check is unavailable, choose **Generate using original request**, or cancel and retry. Cancelling does not guarantee that an already-sent model request will not be billed.
 
-检查结果有效期为 15 分钟，只用于当前账号、当前生成条件的一次生成。改变主题、课程或其他条件，或等待过久，需要重新检查；已接受的生成任务不会因为这个期限到期而失效。补充问题由模型生成，仍可能有误；可以自行纠正问题中的假设或直接返回修改学习目标。技术记录与开发验证见[需求检查接入说明](https://github.com/TheOverflowing/lumori-fyp/blob/ca1-2026-09-20/docs/rag/CLARIFICATION_RUNTIME_20260920.md)。
+检查结果有效期为 15 分钟，只用于当前账号、当前生成条件的一次生成。改变主题、课程或其他条件，或等待过久，需要重新检查；已接受的生成任务不会因为这个期限到期而失效。补充问题由模型生成，仍可能有误；可以自行纠正问题中的假设或直接返回修改学习目标。技术记录与开发验证见[需求检查接入说明](https://github.com/TheOverflowing/lumori-fyp/blob/snapshot-2026-09-24/docs/rag/CLARIFICATION_RUNTIME_20260920.md)。
 
-A check is valid for 15 minutes and one generation with the same account and settings. Change the topic, course, or other settings—or wait too long—and a new check is needed. An already accepted generation does not expire with the check. Model-generated follow-ups may be mistaken; correct their assumptions in your reply or return to edit the objective. See the [implementation and development record](https://github.com/TheOverflowing/lumori-fyp/blob/ca1-2026-09-20/docs/rag/CLARIFICATION_RUNTIME_20260920.md) for details.
+A check is valid for 15 minutes and one generation with the same account and settings. Change the topic, course, or other settings—or wait too long—and a new check is needed. An already accepted generation does not expire with the check. Model-generated follow-ups may be mistaken; correct their assumptions in your reply or return to edit the objective. See the [implementation and development record](https://github.com/TheOverflowing/lumori-fyp/blob/snapshot-2026-09-24/docs/rag/CLARIFICATION_RUNTIME_20260920.md) for details.
 
 ## 自动探索 · Auto exploration
 
@@ -107,9 +107,9 @@ A check is valid for 15 minutes and one generation with the same account and set
 
 If you have no uploaded sources, or existing materials cover only part of your objective, enable **Auto exploration** in **Settings** at the bottom of the sidebar. It is off by default and remembered per account in this browser. A course and configured text and embedding models are still required; uploading a file first is optional in this mode. With exploration off, enabled course sources with ready indexes are required.
 
-系统先检查已有依据，必要时查找公开参考资料。下载并解析后，先建立临时索引，再按缺少的知识点查找相关段落；通过检查的资料会保存到当前课程，用于继续生成。默认“公开课程目录”只从预设公开课程网址中寻找材料，然后联网读取；它不是全网搜索。维护者配置 Brave Search 后才可进行实时网页搜索。可以在设置的“资料搜索”一行查看当前提供方。
+系统先检查已有依据，必要时查找公开参考资料。下载并解析后，先建立临时索引，再按缺少的知识点查找相关段落；通过检查的资料会保存到当前课程，用于继续生成。默认“课程目录与百科搜索”优先查精选课程资料，并补充有界的百科文章搜索；它仍不是全网搜索。找到网页后还要核对可保存许可与正文证据。维护者配置 Brave Search 后可使用更广的实时网页搜索。可以在设置的“资料搜索”一行查看当前提供方。
 
-The app checks existing evidence and finds public references when needed. After downloading and parsing, it creates a temporary index and retrieves passages for each missing concept. Sources that pass the evidence check are saved to the current course for generation. The default **Public course directory** searches a preset collection of public course URLs and then reads them online; it is not a full web search. Live web search requires Brave Search configuration by the operator. Check **Source search** in Settings to see the current provider.
+The app checks existing evidence and finds public references when needed. After downloading and parsing, it creates a temporary index and retrieves passages for each missing concept. Sources that pass the evidence check are saved to the current course for generation. The default **Course directory and encyclopedia search** starts with reviewed course pages and adds bounded encyclopedia article search. It is broader than the preset catalog but is not a full web search; pages must still pass license and evidence checks. Full web search requires Brave Search configuration by the operator. Check **Source search** in Settings to see the current provider.
 
 只有通过筛选且允许自动保存的来源才会进入当前课程，标记为“自动发现”。可保存来源包括已有明确政策的目录资料，以及网页明确声明受支持开放许可的内容；没有明确许可的材料不会自动收录。可在资料列表和生成内容的引用面板打开原始来源，并像上传的文件一样停用或删除。资料归当前账号所有；关闭探索不会移除已保存资料。搜索使用提炼的公共概念词，不直接把上传文件全文交给搜索服务；资料覆盖与选择仍使用已配置的文本模型。
 
@@ -119,9 +119,9 @@ Only selected sources with an established storage policy are added to the curren
 
 By default, exploration allows up to two rounds and five accepted sources, with call and time limits. It adds waiting time and may incur API charges; suitable public material is not guaranteed for every topic. It does not analyze figures, and discovered PDFs use Standard parsing. The progress page shows searching, reading, selection and indexing; choose **View result** when generation finishes. AI selection and existing citations do not establish teacher verification—check the output against the source.
 
-如果缺少的是你的具体题目、图片或教师要求，网上资料不能代替，系统会提示补充。探索达到上限或仍缺乏依据时不会强行生成，已成功保存的资料会保留。更改开关会使尚未提交的需求检查失效；已经提交的任务保持原设置。探索阶段中断后请新建任务，避免盲目重复可能已经计费的请求。实现与实验边界见[自动探索记录](https://github.com/TheOverflowing/lumori-fyp/blob/ca1-2026-09-20/docs/rag/AUTO_EXPLORATION_V1.md)。
+如果缺少的是你的具体题目、图片或教师要求，网上资料不能代替，系统会提示补充。探索达到上限或仍缺乏依据时不会强行生成，已成功保存的资料会保留。更改开关会使尚未提交的需求检查失效；已经提交的任务保持原设置。探索阶段中断后请新建任务，避免盲目重复可能已经计费的请求。实现与实验边界见[自动探索记录](https://github.com/TheOverflowing/lumori-fyp/blob/snapshot-2026-09-24/docs/rag/AUTO_EXPLORATION_V1.md)。
 
-Public sources cannot replace your missing original question, image, or teacher-specific requirements; the app will ask for the needed information. If limits are reached or evidence remains insufficient, generation stops and successfully saved sources remain. Changing the switch invalidates an unsubmitted detail check; submitted tasks keep their original settings. After an interrupted exploration, start a new task to avoid blindly repeating potentially billed requests. See the [implementation and evaluation record](https://github.com/TheOverflowing/lumori-fyp/blob/ca1-2026-09-20/docs/rag/AUTO_EXPLORATION_V1.md) for details.
+Public sources cannot replace your missing original question, image, or teacher-specific requirements; the app will ask for the needed information. If limits are reached or evidence remains insufficient, generation stops and successfully saved sources remain. Changing the switch invalidates an unsubmitted detail check; submitted tasks keep their original settings. After an interrupted exploration, start a new task to avoid blindly repeating potentially billed requests. See the [implementation and evaluation record](https://github.com/TheOverflowing/lumori-fyp/blob/snapshot-2026-09-24/docs/rag/AUTO_EXPLORATION_V1.md) for details.
 
 ## 生成进度 · Generation progress
 
@@ -201,14 +201,14 @@ After text approval, configured speech and image services can generate media for
 
 **Settings** at the bottom of the sidebar groups generation preferences and model connections. **Fusion mode** is off by default and is remembered per account in this browser. A different browser or cleared site storage requires a new choice. Changes apply to subsequent new requests, without modifying running tasks or the shared server model configuration.
 
-开启融合后，系统可生成一个保守的检索改写，将原输入和改写分别检索，再合并候选。它可能增加一次文本调用和一次嵌入调用，也可能理解错误，不保证更好的召回。选择“不确定”或在检查失败后按原文继续时，不额外猜测和改写；改写不可用时回到原查询。算法、限制和验证记录见[融合模式接入记录](https://github.com/TheOverflowing/lumori-fyp/blob/ca1-2026-09-20/docs/rag/QUERY_FUSION_RUNTIME_20260920.md)。
+开启融合后，系统可生成一个保守的检索改写，将原输入和改写分别检索，再合并候选。它可能增加一次文本调用和一次嵌入调用，也可能理解错误，不保证更好的召回。选择“不确定”或在检查失败后按原文继续时，不额外猜测和改写；改写不可用时回到原查询。算法、限制和验证记录见[融合模式接入记录](https://github.com/TheOverflowing/lumori-fyp/blob/snapshot-2026-09-24/docs/rag/QUERY_FUSION_RUNTIME_20260920.md)。
 
-When enabled, fusion may create a conservative search rewrite, retrieve with both queries, and combine their candidates. It may add one text call and one embedding call, and does not guarantee better retrieval. Continuing without clarification does not trigger a speculative rewrite; unavailable rewriting falls back to the original query. See the [runtime record](https://github.com/TheOverflowing/lumori-fyp/blob/ca1-2026-09-20/docs/rag/QUERY_FUSION_RUNTIME_20260920.md) for the algorithm and evidence boundaries.
+When enabled, fusion may create a conservative search rewrite, retrieve with both queries, and combine their candidates. It may add one text call and one embedding call, and does not guarantee better retrieval. Continuing without clarification does not trigger a speculative rewrite; unavailable rewriting falls back to the original query. See the [runtime record](https://github.com/TheOverflowing/lumori-fyp/blob/snapshot-2026-09-24/docs/rag/QUERY_FUSION_RUNTIME_20260920.md) for the algorithm and evidence boundaries.
 
 “模型连接”展示配置状态。模型地址、名称和密钥由本地维护者在 `.env` 中设置，保存后重启应用；网页不显示密钥。“已填写配置”只表示配置完整，实际连接需通过调用验证。
 
 **Model connections** shows configuration status. The local operator sets endpoints, model names, and keys in `.env`, then restarts the app. Keys are not displayed in the browser. **Configured** indicates that fields are present; a successful call is still needed to verify connectivity.
 
-调用数按账号和 UTC 日期统计，包括失败尝试；次数上限不是费用上限。账号的数据相互隔离，但服务端模型配置共用。详细安装、配置和限制见[项目 README](../README.md)，实验与研究指标见 [RAG 实验档案](https://github.com/TheOverflowing/lumori-fyp/blob/ca1-2026-09-20/docs/rag/README.md)和[文档解析实验](https://github.com/TheOverflowing/lumori-fyp/blob/ca1-2026-09-20/docs/parsing/README.md)。
+调用数按账号和 UTC 日期统计，包括失败尝试；次数上限不是费用上限。账号的数据相互隔离，但服务端模型配置共用。详细安装、配置和限制见[项目 README](../README.md)，实验与研究指标见 [RAG 实验档案](https://github.com/TheOverflowing/lumori-fyp/blob/snapshot-2026-09-24/docs/rag/README.md)和[文档解析实验](https://github.com/TheOverflowing/lumori-fyp/blob/snapshot-2026-09-24/docs/parsing/README.md)。
 
-Calls are counted per account and UTC date, including failed attempts. A call limit is not a spending cap. Accounts have separate data but share the server's model configuration. See the [project README](../README.md) for setup and limits, and the [RAG archive](https://github.com/TheOverflowing/lumori-fyp/blob/ca1-2026-09-20/docs/rag/README.md) and [document parsing archive](https://github.com/TheOverflowing/lumori-fyp/blob/ca1-2026-09-20/docs/parsing/README.md) for research results.
+Calls are counted per account and UTC date, including failed attempts. A call limit is not a spending cap. Accounts have separate data but share the server's model configuration. See the [project README](../README.md) for setup and limits, and the [RAG archive](https://github.com/TheOverflowing/lumori-fyp/blob/snapshot-2026-09-24/docs/rag/README.md) and [document parsing archive](https://github.com/TheOverflowing/lumori-fyp/blob/snapshot-2026-09-24/docs/parsing/README.md) for research results.

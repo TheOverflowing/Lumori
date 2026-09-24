@@ -23,13 +23,19 @@ export function setText(element, key, values = {}) {
   element.dataset.i18nValues = JSON.stringify(values);
   element.textContent = t(key, values);
 }
+const dateFormatters = new Map();
 export const formatDate = value => {
   const date = new Date(value);
-  return Number.isNaN(date.valueOf()) ? '' : date.toLocaleString(locale(), {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+  if (Number.isNaN(date.valueOf())) return '';
+  const language = locale();
+  if (!dateFormatters.has(language)) dateFormatters.set(language,
+    new Intl.DateTimeFormat(language, {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}));
+  return dateFormatters.get(language).format(date);
 };
 export function localize(root = document) {
   root.querySelectorAll('[data-i18n]').forEach(element => {
-    element.textContent = t(element.dataset.i18n, JSON.parse(element.dataset.i18nValues || '{}'));
+    const translated = t(element.dataset.i18n, JSON.parse(element.dataset.i18nValues || '{}'));
+    if (element.textContent !== translated) element.textContent = translated;
   });
   for (const attribute of ['aria-label', 'title', 'placeholder', 'data-short-label', 'alt']) {
     root.querySelectorAll(`[data-i18n-${attribute}]`).forEach(element => element.setAttribute(attribute, t(element.getAttribute(`data-i18n-${attribute}`))));

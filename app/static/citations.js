@@ -116,6 +116,7 @@ export function mountCitations(root, sources = [], asset = {}) {
   doc.body.append(preview);
   let active = null;
   let disposed = false;
+  let positionFrame = 0;
   const close = (restore = false) => {
     if (!active) return;
     const previous = active;
@@ -136,8 +137,9 @@ export function mountCitations(root, sources = [], asset = {}) {
     const height = viewport?.height || win.innerHeight;
     const edge = 12;
     if (anchor.bottom < topEdge || anchor.top > topEdge + height) { close(); return; }
-    preview.style.maxHeight = `${Math.max(120,height - edge * 2)}px`;
-    preview.style.width = `${Math.min(380,width - edge * 2)}px`;
+    const maxHeight = `${Math.max(120,height - edge * 2)}px`, nextWidth = `${Math.min(380,width - edge * 2)}px`;
+    if (preview.style.maxHeight !== maxHeight) preview.style.maxHeight = maxHeight;
+    if (preview.style.width !== nextWidth) preview.style.width = nextWidth;
     // The entry transform scales the presentation rect. Placement must use the
     // settled layout size so the preview keeps its edge inset after animation.
     const box = {width:preview.offsetWidth, height:preview.offsetHeight};
@@ -149,6 +151,10 @@ export function mountCitations(root, sources = [], asset = {}) {
     preview.style.left = `${x}px`;
     preview.style.top = `${y}px`;
     preview.style.transformOrigin = `${Math.max(16,Math.min(box.width - 16,anchor.left + anchor.width / 2 - x))}px ${openAbove ? '100%' : '0%'}`;
+  };
+  const schedulePosition = () => {
+    if (!active || disposed || positionFrame) return;
+    positionFrame = win.requestAnimationFrame(() => { positionFrame = 0; if (!disposed) position(); });
   };
   const click = event => {
     const button = event.target?.closest?.('[data-citation-id]');
@@ -191,25 +197,26 @@ export function mountCitations(root, sources = [], asset = {}) {
   doc.addEventListener('pointerdown',outside);
   doc.addEventListener('focusin',focus);
   doc.addEventListener('keydown',keydown);
-  win.addEventListener('resize',position);
-  win.addEventListener('scroll',position,true);
+  win.addEventListener('resize',schedulePosition);
+  win.addEventListener('scroll',schedulePosition,{capture:true,passive:true});
   win.addEventListener('appearancechange',language);
-  win.visualViewport?.addEventListener('resize',position);
-  const resize = typeof win.ResizeObserver === 'function' ? new win.ResizeObserver(position) : null;
+  win.visualViewport?.addEventListener('resize',schedulePosition);
+  const resize = typeof win.ResizeObserver === 'function' ? new win.ResizeObserver(schedulePosition) : null;
   resize?.observe(preview);
   return () => {
     if (disposed) return;
     disposed = true;
+    if (positionFrame) win.cancelAnimationFrame(positionFrame);
     close();
     root.removeEventListener('click',click);
     preview.removeEventListener('click',previewClick);
     doc.removeEventListener('pointerdown',outside);
     doc.removeEventListener('focusin',focus);
     doc.removeEventListener('keydown',keydown);
-    win.removeEventListener('resize',position);
-    win.removeEventListener('scroll',position,true);
+    win.removeEventListener('resize',schedulePosition);
+    win.removeEventListener('scroll',schedulePosition,true);
     win.removeEventListener('appearancechange',language);
-    win.visualViewport?.removeEventListener('resize',position);
+    win.visualViewport?.removeEventListener('resize',schedulePosition);
     resize?.disconnect();
     preview.remove();
   };

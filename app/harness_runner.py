@@ -166,6 +166,7 @@ def child_environment(home, cache, token):
 
 
 async def run_harness_phase(agent, messages, phase, report):
+    from .task_control import JobCancelled
     settings = agent.settings
     proposal = proposal_only(settings, messages)
     if settings.harness_reasoning_effort not in ('off', 'high'):
@@ -191,10 +192,21 @@ async def run_harness_phase(agent, messages, phase, report):
         'audit_path': str(run_dir / 'tools.jsonl')}
     scoped = ScopedTeachingTools(manifest)
 
-    def scope():
+    def check_cancellation():
+        try:
+            agent.store.check_cancelled(agent.job_id)
+        except JobCancelled:
+            report['status'] = 'cancelled'
+            raise
+
+    def scope(*, completed_response=False):
+        if not completed_response:
+            check_cancellation()
         try:
             agent.check_scope()
-            scoped._check_scope()  # Also enforce document scope for research fixtures.
+            # Final response handling may preserve an already returned result,
+            # but it must never bypass course/document authorization.
+            scoped._check_scope(allow_cancelled=completed_response)
         except Exception:
             raise ValueError('本任务的账号、课程或资料范围已改变。') from None
 
@@ -244,17 +256,22 @@ async def run_harness_phase(agent, messages, phase, report):
                 final = app.state.audit[-1]['response']
                 if final['choices'][0]['message'].get('tool_calls'):
                     raise ProviderOutputError('Harness 在工具调用后未提供最终 JSON。')
-                scope()
+                scope(completed_response=True)
                 value = strict_text_object(final)
                 report['status'] = 'completed'
                 return value
+    except JobCancelled:
+        report['status'] = 'cancelled'
+        raise
     except TimeoutError:
+        check_cancellation()
         report['status'] = 'timeout'
         raise ProviderError('Harness 本阶段超时；已停止，可从任务详情明确继续。') from None
     except asyncio.CancelledError:
         report['status'] = 'interrupted'
         raise
     except (ProviderError, ValueError):
+        check_cancellation()
         report['status'] = 'failed'
         raise
     except Exception:

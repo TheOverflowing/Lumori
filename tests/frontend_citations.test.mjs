@@ -144,6 +144,8 @@ test('mount without a live root returns a harmless cleanup', () => {
 
 test('preview placement uses settled layout dimensions while the entry transform is scaled', () => {
   const listeners = new Map();
+  const windowListeners = new Map(), frames = new Map();
+  let frameId=0, anchorReads=0;
   const noop = () => {};
   const preview = {
     style:{}, dataset:{}, offsetWidth:380, offsetHeight:419,
@@ -151,11 +153,13 @@ test('preview placement uses settled layout dimensions while the entry transform
     setAttribute:noop, removeAttribute:noop, addEventListener:noop, removeEventListener:noop,
     remove:noop, contains:() => false,
   };
-  const win = {innerWidth:573,innerHeight:734,addEventListener:noop,removeEventListener:noop};
+  const win = {innerWidth:573,innerHeight:734,
+    addEventListener:(name,listener)=>windowListeners.set(name,listener),removeEventListener:noop,
+    requestAnimationFrame:callback=>{frames.set(++frameId,callback);return frameId;},cancelAnimationFrame:id=>frames.delete(id)};
   const doc = {defaultView:win,createElement:() => preview,body:{append:noop},addEventListener:noop,removeEventListener:noop};
   const button = {
     dataset:{citationId:first}, isConnected:true,
-    getBoundingClientRect:() => ({left:540,top:295,bottom:319,width:28}),
+    getBoundingClientRect:() => {anchorReads++;return {left:540,top:295,bottom:319,width:28};},
     setAttribute:noop,removeAttribute:noop,
   };
   const root = {ownerDocument:doc,contains:node => node === button,addEventListener:(name,listener) => listeners.set(name,listener),removeEventListener:noop};
@@ -165,5 +169,12 @@ test('preview placement uses settled layout dimensions while the entry transform
   assert.equal(preview.style.top,'303px');
   assert.equal(573 - parseFloat(preview.style.left) - preview.offsetWidth,12);
   assert.equal(734 - parseFloat(preview.style.top) - preview.offsetHeight,12);
+  for(let n=0;n<10;n++)windowListeners.get('scroll')();
+  assert.equal(frames.size,1,'scroll bursts share one placement per frame');
+  assert.equal(anchorReads,1);
+  const callback=[...frames.values()][0];frames.clear();callback();
+  assert.equal(anchorReads,2);
+  windowListeners.get('scroll')();
   cleanup();
+  assert.equal(frames.size,0,'disposing cancels queued layout work');
 });

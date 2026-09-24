@@ -89,6 +89,23 @@ def payload(rig, **updates):
     return value
 
 
+@pytest.mark.parametrize('material', ['quiz', 'assignment'])
+def test_subagent_choice_fails_early_when_agent_workflow_is_disabled(rig, material):
+    request = payload(rig, material=material, use_subagents=True)
+    response = rig.alice.post('/api/generations', json=request)
+    assert response.status_code == 400
+    assert '逐题子代理' in response.json()['detail']
+    assert rig.enqueued == []
+
+
+def test_explicit_subagent_opt_out_is_preserved_for_restored_request(rig):
+    response = rig.alice.post('/api/generations', json=payload(rig, use_subagents=False))
+    assert response.status_code == 202, response.text
+    saved = rig.alice.get('/api/jobs/' + response.json()['job_id'] + '/generation-request')
+    assert saved.status_code == 200, saved.text
+    assert saved.json()['request']['use_subagents'] is False
+
+
 def prepare(rig, data=None, client=None):
     data = data or payload(rig)
     response = (client or rig.alice).post('/api/generations/prepare', json=data)

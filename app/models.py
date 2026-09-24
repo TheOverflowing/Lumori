@@ -29,6 +29,9 @@ class GenerateRequest(Model):
     request_key: str = Field(min_length=8, max_length=100)
     query_fusion: bool = Field(default=False, strict=True)
     auto_explore: bool = Field(default=False, strict=True)
+    # None keeps historical/server-configured jobs on their original route.
+    # New web requests explicitly choose True or False for assessments.
+    use_subagents: bool | None = Field(default=None, strict=True)
     # Teaching material before an assessment; answer explanations are unchanged.
     include_explanations: bool = Field(default=False, strict=True)
     preparation_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
@@ -47,6 +50,8 @@ class GenerateRequest(Model):
                 raise ValueError('学习讲解只设置讲解深度，不分配题目难度。')
             if sum(self.difficulty_distribution.model_dump().values()) != self.count:
                 raise ValueError('简单、中等、困难的题数之和必须等于题目总数；每档可以为 0。')
+        if self.material == 'lesson' and self.use_subagents is True:
+            raise ValueError('逐题子代理只适用于测验和作业。')
         return self
 
     @model_serializer(mode='wrap')
@@ -61,6 +66,8 @@ class GenerateRequest(Model):
             values.pop('query_fusion', None)
         if not self.auto_explore:
             values.pop('auto_explore', None)
+        if self.use_subagents is None:
+            values.pop('use_subagents', None)
         # Historical preparation fingerprints must keep their original shape.
         # New generation configurations freeze the resolved value explicitly.
         if 'include_explanations' not in self.model_fields_set:

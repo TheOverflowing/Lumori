@@ -43,4 +43,4 @@ All routes require the owning account. Binary document downloads use the existin
 
 ## Verification
 
-See [initial rating/export QA](https://github.com/TheOverflowing/lumori-fyp/blob/ca1-2026-09-20/docs/ui/review-exports-20260920/README.md) and [document grouping and toolbar QA](https://github.com/TheOverflowing/lumori-fyp/blob/ca1-2026-09-20/docs/ui/difficulty-export-polish-20260920/README.md). Automated tests and synthetic fixtures are separate from real provider runs and user ratings.
+See [initial rating/export QA](https://github.com/TheOverflowing/lumori-fyp/blob/snapshot-2026-09-24/docs/ui/review-exports-20260920/README.md) and [document grouping and toolbar QA](https://github.com/TheOverflowing/lumori-fyp/blob/snapshot-2026-09-24/docs/ui/difficulty-export-polish-20260920/README.md). Automated tests and synthetic fixtures are separate from real provider runs and user ratings.

@@ -68,6 +68,24 @@ test('fusion defaults off and restores per account without a shared fallback',()
   preferences.setAccount(null);assert.deepEqual(preferences.requestFields(),{});
 });
 
+test('per-question agents are account-scoped and included only for quiz or assignment',()=>{
+  const storage=memoryStorage(), changes=[];
+  const preferences=createGenerationPreferences({storage,onChange:change=>changes.push(change)});
+  preferences.setAccount('a');
+  assert.deepEqual(preferences.requestFields('quiz'),{use_subagents:false});
+  preferences.setUseSubagents(true);
+  assert.deepEqual(preferences.requestFields('quiz'),{use_subagents:true});
+  assert.deepEqual(preferences.requestFields('assignment'),{use_subagents:true});
+  assert.deepEqual(preferences.requestFields('lesson'),{});
+  assert.deepEqual(changes[0].changed,['useSubagents']);
+  preferences.setAccount('b');assert.equal(preferences.useSubagents,false);
+  preferences.setAccount('a');assert.equal(preferences.useSubagents,true);
+  assert.equal(JSON.parse(storage.getItem(generationPreferencesKey('a'))).use_subagents,true);
+  storage.setItem(generationPreferencesKey('a'),'{"use_subagents":"true"}');
+  preferences.syncStorage(generationPreferencesKey('a'));
+  assert.equal(preferences.useSubagents,false);
+});
+
 test('only strict boolean storage enables fusion; malformed data stays off',()=>{
   for(const value of ['broken','null','true','{"query_fusion":"true"}','{"query_fusion":1}']){
     const storage=memoryStorage();storage.setItem(generationPreferencesKey('a'),value);
@@ -124,16 +142,38 @@ test('fusion is captured in prepare and generation retries while the original to
   assert.deepEqual(calls[1],calls[2]);assert.equal(calls[2].body.topic,'Explain the fast thing');
 });
 
+test('per-question agent choice is frozen through preparation and retry',async()=>{
+  const preferences=createGenerationPreferences({storage:memoryStorage()}), calls=[];
+  preferences.setAccount('a');preferences.setUseSubagents(true);
+  const snapshot={material:'assignment',topic:'Compare two algorithms',request_key:'subagent-one',
+    ...preferences.requestFields('assignment')};
+  const flow=createGenerationFlow({request:async(path,method,body)=>{
+    calls.push({path,body:structuredClone(body)});
+    if(path.endsWith('/prepare'))return {preparation_id:'a'.repeat(32),status:'ready',options:[],expires_at:1900000000};
+    if(calls.length===2)throw Error('network');
+    return {job_id:'one'};
+  }});
+  await assert.rejects(flow.start(snapshot),/network/);
+  preferences.setUseSubagents(false);
+  await flow.retry();
+  assert.equal(calls[0].body.use_subagents,true);
+  assert.equal(calls[1].body.use_subagents,true);
+  assert.deepEqual(calls[1],calls[2]);
+});
+
 test('minimal settings and switch preserve bilingual accessible labels and escape model names',()=>{
   try{
     document.documentElement.lang='en';
     const html=renderSettings(true);
     assert.match(html,/Generation/);assert.match(html,/Fusion mode/);assert.match(html,/Model connections/);
     assert.match(html,/role="switch" id="query-fusion" checked/);
+    assert.match(renderSettings(false,'detailed',false,true),/role="switch" id="use-subagents" checked/);
+    assert.match(html,/Per-question agents \(quizzes &amp; assignments\)|Per-question agents \(quizzes & assignments\)/);
     assert.doesNotMatch(html,/hint|<small|调用|call/);
     assert.match(renderSwitch({id:'ask',label:'生成前追问'}),/Ask before generating/);
     const models=renderModelConnections({text:{model:'<script>private</script>',configured:true}});
     assert.match(models,/&lt;script&gt;/);assert.doesNotMatch(models,/<script>/);
     document.documentElement.lang='zh-CN';assert.match(renderSettings(false),/>融合模式</);
+    assert.match(renderSettings(false),/>逐题子代理（测验与作业）</);
   }finally{document.documentElement.lang='zh-CN';}
 });

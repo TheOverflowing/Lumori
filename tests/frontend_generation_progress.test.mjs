@@ -294,8 +294,8 @@ test('temporary polling failure retries and recovers even when job contents do n
 test('generation and media creation route to progress, while course changes leave the task context', () => {
   const source=readFileSync('app/static/app.js','utf8');
   assert.match(source,/onCreated:job=>\{\s*state\.library=.*?go\('progress',job\.job_id\)/s);
-  assert.match(source,/name === 'progress' \? 'jobs'/);
-  assert.match(source,/else if\(state\.route\.page==='progress'\)go\('jobs'\)/);
+  assert.match(source,/\['progress','partial'\]\.includes\(name\) \? 'jobs'/);
+  assert.match(source,/else if\(\['progress','partial'\]\.includes\(state\.route\.page\)\)go\('jobs'\)/);
   assert.match(source,/make-media.*?go\('progress',job\.job_id\)/);
 });
 
@@ -631,4 +631,44 @@ test('simple progress duration updates preserve stage nodes and completion glyph
   assert.equal(row.dataset.state,'completed');assert.equal(icon.writes,0);
   assert.equal(icons.querySelectorAll().find(layer=>layer.dataset.motionLayer==='check').dataset.visible,'true');
   controller.destroy();
+});
+
+
+test('only server-authorized live tasks can stop and stopping leaves no second clickable request',()=>{
+  for(const mode of ['simple','detailed']) {
+    assert.doesNotMatch(renderGenerationProgress(job(),{mode}),/data-action="cancel-generation"/);
+    assert.match(renderGenerationProgress(job({cancellable:true}),{mode}),/data-action="cancel-generation"[^>]*>/);
+    const stopping=job({cancellable:true,cancel_requested:true});
+    assert.equal(generationProgressView(stopping).title,'正在停止任务');
+    assert.match(renderGenerationProgress(stopping,{mode}),/data-action="cancel-generation"[^>]*disabled/);
+    for(const status of ['succeeded','failed','insufficient_evidence','cancelled']) assert.doesNotMatch(renderGenerationProgress(job({status,cancellable:true,cancel_requested:true}),{mode}),/data-action="cancel-generation"/);
+  }
+});
+
+test('stopped resumable tasks preserve partial access separately from complete publication',()=>{
+  for(const mode of ['simple','detailed']) {
+    const stopped=job({status:'cancelled',partial_available:true,progress:{resumable:true}});
+    const view=generationProgressView(stopped), html=renderGenerationProgress(stopped,{mode});
+    assert.equal(view.terminal,true);
+    assert.equal(view.resumable,true);
+    assert.match(html,/data-action="open-partial" data-id="task1"/);
+    assert.match(html,/data-action="resume-generation"/);
+    assert.doesNotMatch(html,/data-action="open-content"/);
+    for(const extra of [{partial_available:false},{kind:'media'},{kind:'revise_question'},{status:'succeeded'}]) assert.doesNotMatch(renderGenerationProgress({...stopped,...extra},{mode}),/data-action="open-partial"/);
+  }
+});
+
+test('cancelled terminal tasks never start polling',()=>{
+  let loads=0;
+  const stop=watchGenerationProgress({initial:job({status:'cancelled'}),load:()=>{loads++;},update(){},error(){}});
+  assert.equal(loads,0);stop();
+});
+
+test('question revision progress supports resumable errors and a saved new version result',()=>{
+  const failed=job({kind:'revise_question',status:'failed',progress:{resumable:true,resume_kind:'repair'}});
+  assert.equal(generationProgressView(failed).resumeKind,'repair');
+  assert.equal(generationProgressView(failed).canRestore,false);
+  const complete={...failed,status:'succeeded',result:{content_id:'same-content',version:2}};
+  assert.equal(generationProgressView(complete).title,'修改完成');
+  assert.match(renderGenerationProgress(complete),/data-action="open-content" data-id="same-content"/);
 });

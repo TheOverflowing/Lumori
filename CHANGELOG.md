@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.0 — 2026-09-24
+
+- Add cancellation/recovery, passed partial results and version-checked question revision.
+- Sync generation quality gates, resource limits, hybrid exploration and frontend performance updates.
+- Preserve deployment settings and update the container smoke assertion for readiness-aware health responses.
+- Research snapshot: `snapshot-2026-09-24`; thesis and experiments remain in the research repository.
+
 ## v0.2.0-ca1 — 2026-09-20
 
 - Sync the CA1 application from research tag `ca1-2026-09-20`: per-question generation/review, continuation, difficulty acceptance, query fusion/clarification, bounded source exploration, document lifecycle, ratings and Word/PDF exports.

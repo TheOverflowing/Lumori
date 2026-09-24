@@ -19,7 +19,7 @@ const activityLabels = {
   generating_audio:'正在生成语音', generating_image:'正在生成图片', generating_video:'正在生成视频',
 };
 const eventActivities = {...activityLabels, retrieving:'检查可用课程资料', embedding:'准备语义检索', rewriting:'生成检索改写', reranking:'重新筛选候选资料', validating:'校验格式与引用'};
-const stageStatuses = {pending:'待处理', active:'进行中', completed:'已完成', failed:'未完成', blocked:'需要补充资料'};
+const stageStatuses = {pending:'待处理', active:'进行中', completed:'已完成', failed:'未完成', blocked:'需要补充资料', cancelled:'已停止'};
 const icons = {
   exploration:'<circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18M5 6h14M5 18h14"/>',
   retrieval:'<circle cx="10" cy="10" r="5.5"/><path d="m14 14 5 5"/>',
@@ -107,11 +107,12 @@ export function generationProgressView(job) {
     elapsed:validDuration(stage.elapsed_ms), timingComplete:stage.timing_complete === true,
   })) : [];
   const active = stages.find(stage => stage.id === timeline.active_stage);
-  const providerFailure = job.status === 'failed' && job.kind === 'generate' ? transientTextErrors.get(job.error) : null;
-  const resumable = job.status === 'failed' && job.progress?.resumable === true;
-  const resumeKind = resumable && job.kind === 'generate' && job.progress?.resume_kind === 'repair' ? 'repair' : 'continue';
-  const title = job.status === 'queued' ? '等待开始'
-    : job.status === 'succeeded' ? '生成完成'
+  const providerFailure = job.status === 'failed' && ['generate','revise_question'].includes(job.kind) ? transientTextErrors.get(job.error) : null;
+  const resumable = ['failed','cancelled'].includes(job.status) && job.progress?.resumable === true;
+  const resumeKind = resumable && ['generate','revise_question'].includes(job.kind) && job.progress?.resume_kind === 'repair' ? 'repair' : 'continue';
+  const cancelRequested = !terminal.has(job.status) && job.cancel_requested === true;
+  const title = cancelRequested ? '正在停止任务' : job.status === 'queued' ? '等待开始'
+    : job.status === 'succeeded' ? (job.kind === 'revise_question' ? '修改完成' : '生成完成')
     : job.status === 'insufficient_evidence' ? '需要补充资料'
     : job.status === 'failed' ? providerFailure || (resumeKind === 'repair' ? '题目还需完善' : '生成暂时中断')
     : job.status === 'cancelled' ? '任务已停止'
@@ -128,9 +129,13 @@ export function generationProgressView(job) {
     counter:hasCount ? {done:timeline.completed, total:timeline.total} : null,
     contentId:job.status === 'succeeded' ? job.content_id || job.result?.content_id || null : null,
     resumable, resumeKind,
+    cancellable:!terminal.has(job.status) && job.cancellable === true, cancelRequested,
+    partialAvailable:job.kind === 'generate' && job.status !== 'succeeded' && job.partial_available === true,
     canRestore:job.kind === 'generate' && ['failed','insufficient_evidence','cancelled'].includes(job.status),
     reason:['failed','insufficient_evidence'].includes(job.status) ? String(job.error || job.result?.message || '') : '',
-    message:providerFailure ? (job.progress?.resumable ? '任务进度已保留，服务恢复后可继续生成。' : '生成条件已保留，可稍后返回修改并重试。')
+    message:cancelRequested ? '正在等待当前步骤安全停止，已完成的题目会保留。'
+      : job.status === 'cancelled' ? '任务已停止，已完成的题目已保留。'
+      : providerFailure ? (job.progress?.resumable ? '任务进度已保留，服务恢复后可继续生成。' : '生成条件已保留，可稍后返回修改并重试。')
       : job.status === 'insufficient_evidence' ? '补充或启用相关资料后，可重新生成。'
       : resumeKind === 'repair' ? '已完成的题目已保留，仅继续修正未通过的题目。'
       : job.status === 'failed' ? (job.progress?.resumable ? '已完成的题目已保留。' : job.kind === 'generate' ? '生成条件已保留，可返回修改后重试。' : '请检查资料与模型连接后重新生成。') : '',
@@ -150,7 +155,9 @@ function actionMarkup(view) {
     : view.canRestore ? `<button data-action="restore-generation" data-id="${escape(view.id)}">${m('返回修改')}</button>`
     : view.terminal ? `<button data-action="generate">${m('返回创作')}</button>` : '';
   const restore = view.canRestore && (view.resumable || view.status === 'insufficient_evidence') ? `<button class="secondary" data-action="restore-generation" data-id="${escape(view.id)}">${m('返回修改')}</button>` : '';
-  return `${primary}${restore}<a class="button secondary" href="#${view.terminal ? 'jobs' : 'generate'}">${m(view.terminal ? '任务记录' : '返回创作')}</a>`;
+  const partial = view.partialAvailable ? `<button class="secondary" data-action="open-partial" data-id="${escape(view.id)}">${m('查看已完成题目')}</button>` : '';
+  const cancel = view.cancellable || view.cancelRequested ? `<button class="secondary" data-action="cancel-generation" data-id="${escape(view.id)}" ${view.cancelRequested ? 'disabled aria-busy="true"' : ''}>${m(view.cancelRequested ? '正在停止' : '停止任务')}</button>` : '';
+  return `${primary}${partial}${restore}${cancel}<a class="button secondary" href="#${view.terminal ? 'jobs' : 'generate'}">${m(view.terminal ? '任务记录' : '返回创作')}</a>`;
 }
 
 function renderSimpleProgress(job) {
@@ -291,6 +298,8 @@ export function eventMessage(event) {
     case 'task_failed': return message('任务未完成');
     case 'task_blocked': return message('资料依据不足，已停止');
     case 'task_interrupted': return data.cause === 'service_stop' ? message('服务已停止，任务中断') : data.cause === 'restart' ? message('服务重启后检测到中断') : null;
+    case 'task_cancel_requested': return message('已申请停止任务');
+    case 'task_cancelled': return message('任务已停止');
     case 'task_resumed': return message('任务已恢复');
     default: return null;
   }
@@ -307,7 +316,7 @@ function eventsMarkup(view, selected) {
 }
 function currentStage(view) {
   return view.stages.find(stage => stage.id === view.activeStage)
-    || view.stages.find(stage => ['failed','blocked'].includes(stage.status))
+    || view.stages.find(stage => ['failed','blocked','cancelled'].includes(stage.status))
     || [...view.stages].reverse().find(stage => stage.status === 'completed')
     || view.stages[0] || null;
 }
@@ -318,8 +327,9 @@ function selectedHeadline(view, selected) {
   if (!selected) return '任务概况';
   if (selected.status === 'failed' && view.providerFailure) return view.providerFailure;
   if (selected.status === 'failed' && view.resumeKind === 'repair') return '可继续修正此步骤';
+  if (selected.status === 'active' && view.cancelRequested) return '正在停止任务';
   if (selected.status === 'active' && !view.terminal && view.status !== 'queued') return Object.hasOwn(activityLabels,view.activity) ? activityLabels[view.activity] : selected.label;
-  return selected.status === 'completed' ? '此步骤已完成' : ['failed','blocked'].includes(selected.status) ? '此步骤已停止' : '等待此步骤开始';
+  return selected.status === 'completed' ? '此步骤已完成' : ['failed','blocked','cancelled'].includes(selected.status) ? '此步骤已停止' : '等待此步骤开始';
 }
 
 function visualMarkup(kind) {

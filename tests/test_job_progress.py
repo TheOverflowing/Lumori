@@ -473,6 +473,42 @@ def test_failed_attempts_accumulate_but_paused_and_queued_time_are_excluded(agen
     assert codes.count('stage_started') == 2 and codes.count('task_resumed') == 1
 
 
+def test_cancelled_timer_and_event_are_idempotent_and_resume_excludes_pause(agent_case, progress_clock):
+    rig = timed_case(agent_case)
+    job_progress.update(rig.store, rig.job_id, 'retrieval', activity='embedding')
+    progress_clock.advance(1)
+    job_progress.update(rig.store, rig.job_id, 'retrieval', complete=True)
+    job_progress.update(rig.store, rig.job_id, 'writing', activity='reviewing', completed=1)
+    progress_clock.advance(2.5)
+    rig.store.execute("UPDATE jobs SET status='cancelled' WHERE id=?", (rig.job_id,))
+    job_progress.finish(rig.store, rig.job_id, 'cancelled')
+    first = timeline(rig)
+    assert first['elapsed_ms'] == 3500 and first['timing_complete'] is True
+    assert first['completed'] == 1 and first['activity'] is None
+    assert stage_states(first) == {'retrieval': 'completed', 'writing': 'cancelled', 'saving': 'pending'}
+    assert first['events'][-1]['code'] == 'task_cancelled'
+    stored = raw_timeline(rig)
+    progress_clock.advance(30)
+    job_progress.finish(rig.store, rig.job_id, 'cancelled')
+    assert raw_timeline(rig) == stored
+    assert timeline(rig) == first
+    with rig.store.connect() as db:
+        db.execute("UPDATE jobs SET status='queued' WHERE id=?", (rig.job_id,))
+        job_progress.queued(db, rig.job_id)
+    progress_clock.advance(20)
+    assert timeline(rig)['elapsed_ms'] == 3500
+    assert stage_states(timeline(rig)) == {'retrieval': 'completed', 'writing': 'pending', 'saving': 'pending'}
+    rig.store.execute("UPDATE jobs SET status='running' WHERE id=?", (rig.job_id,))
+    job_progress.update(rig.store, rig.job_id, 'writing', activity='reviewing')
+    progress_clock.advance(1.5)
+    job_progress.update(rig.store, rig.job_id, 'writing', complete=True)
+    last = timeline(rig)
+    assert last['elapsed_ms'] == 5000 and one_stage(rig, 'writing')['elapsed_ms'] == 4000
+    codes = [event['code'] for event in last['events']]
+    assert codes.count('task_cancelled') == codes.count('task_resumed') == 1
+    assert 'task_failed' not in codes
+
+
 def test_crash_keeps_only_checkpointed_duration_and_marks_missing_tail(agent_case, progress_clock, monkeypatch):
     rig = timed_case(agent_case)
     job_progress.update(rig.store, rig.job_id, 'writing', activity='writing')

@@ -9,8 +9,9 @@ from .document_parsing import ParsedDocument
 from .figure_schema import validate_description
 from .rag_runtime import document_input
 from .retrieval import normalize_vectors
-from .store import dumps,now,uid
+from .store import Conflict,dumps,now,uid
 from .document_lifecycle import ACTIVE_SQL
+from .task_control import JobCancelled
 
 PROMPT_VERSION='figure-semantics-v2'
 
@@ -40,11 +41,14 @@ async def parse_document(pipeline,payload,jobid):
     from .pipeline import document_chunk_ids
     from .exploration_policy import document_source
     did=payload['document_id'];settings=pipeline.settings;store=pipeline.store
+    store.check_cancelled(jobid)
     async with pipeline.index_locks.setdefault(did,asyncio.Lock()):
         doc,raw=await asyncio.to_thread(source_bytes,pipeline,did)
         options={'tier':payload['tier'],'images':bool(payload['images'])}
         async with pipeline.document_worker_slot:
+            store.check_cancelled(jobid)
             parsed=await document_backends.parse(settings,doc['name'],raw,options['tier'])
+        store.check_cancelled(jobid)
         configuration=pipeline.chunking_configuration()
         report,directory=document_storage.store_assets(settings,did,parsed,
             external_source=document_source(store,did))
@@ -63,7 +67,12 @@ async def parse_document(pipeline,payload,jobid):
     result={'document_id':did,'chunks':len(chunks),'index_rebuild_required':True}
     if options['images']:
         owner=store.one('SELECT user_id FROM job_owners WHERE job_id=?',(jobid,))
-        result['figures_job']=enqueue(pipeline,'figures',did,owner['user_id'] if owner else None)
+        try:
+            result['figures_job']=enqueue(pipeline,'figures',did,owner['user_id'] if owner else None)
+        except Conflict:
+            # Parsing is already committed. A full account queue must not turn
+            # usable text into a failed parse; image processing can start later.
+            result.update(figures_deferred=True,message='文字解析已完成；任务队列已满，可稍后继续处理图片。')
     return result
 
 
@@ -106,6 +115,7 @@ def public_figures(store,did):
 
 async def enrich(pipeline,payload,jobid):
     did=payload['document_id'];settings=pipeline.settings;store=pipeline.store
+    store.check_cancelled(jobid)
     settings.vision.require('vision');settings.embedding.require('embedding')
     async with pipeline.index_locks.setdefault(did,asyncio.Lock()):
         doc,raw=await asyncio.to_thread(source_bytes,pipeline,did)
@@ -114,7 +124,9 @@ async def enrich(pipeline,payload,jobid):
             raise ValueError('该资料尚未启用图片理解，请重新解析并选择图片处理。')
         if report.get('figure_extraction')!='complete':
             async with pipeline.document_worker_slot:
+                store.check_cancelled(jobid)
                 assets,truncated=await document_backends.extract_figures(settings,doc['name'],raw)
+            store.check_cancelled(jobid)
             # Append crops to the original MinerU text report without changing OCR.
             bind_captions(assets,report)
             wrapper=ParsedDocument(doc['name'],'docling_figures',[],assets)
@@ -134,6 +146,7 @@ async def enrich(pipeline,payload,jobid):
             if not assets:raise ValueError('图片已不属于当前解析结果。')
         succeeded=failed=reused=0
         for asset in assets:
+            store.check_cancelled(jobid)
             nearby=next((p['text'] for p in report['pages'] if p['number']==asset['page']),'')[:6000]
             context={'original_caption':asset.get('original_caption',''),'page_context':nearby}
             cache_key=hashlib.sha256(dumps([asset['sha256'],context,settings.vision.signature,PROMPT_VERSION]).encode()).hexdigest()
@@ -167,6 +180,9 @@ async def enrich(pipeline,payload,jobid):
                 store.execute("UPDATE figure_semantics SET status='ready',vector=?,embedding_signature=?,error=NULL,updated_at=? WHERE document_id=? AND asset_id=?",
                     (dumps(vectors[0]),signature,now(),did,asset['id']))
                 succeeded+=1
+            except JobCancelled:
+                store.execute("UPDATE figure_semantics SET status='pending',error=NULL,updated_at=? WHERE document_id=? AND asset_id=?",(now(),did,asset['id']))
+                raise
             except asyncio.CancelledError:
                 store.execute("UPDATE figure_semantics SET status='failed',error=?,updated_at=? WHERE document_id=? AND asset_id=?",('图片处理已中断，请重试。',now(),did,asset['id']))
                 raise

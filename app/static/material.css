@@ -13,18 +13,21 @@
   --panel-shadow: 0 4px 6px -5px rgb(29 46 36 / .08), 0 18px 36px -28px rgb(29 46 36 / .18);
   --glass-shadow: 0 2px 5px rgb(39 56 45 / .025), 0 18px 40px -24px rgb(39 56 45 / .2), inset 0 1px 0 rgb(255 255 255 / .94);
   --control-shadow: 0 2px 3px rgb(39 56 45 / .04), 0 6px 12px -8px rgb(39 56 45 / .25), inset 0 1px 0 white;
+  --canvas-atmosphere: radial-gradient(ellipse at 98% 8%, rgb(238 225 201 / .65), transparent 54%), radial-gradient(ellipse at 0% 95%, rgb(175 204 192 / .47), transparent 58%);
+  --toolbar-surface: 240 242 237;
 }
 body {
   background-color: #eef1ee;
-  background-image: radial-gradient(ellipse at 98% 8%, rgb(238 225 201 / .65), transparent 54%), radial-gradient(ellipse at 0% 95%, rgb(175 204 192 / .47), transparent 58%);
-  background-attachment: fixed;
+  isolation: isolate;
 }
+/* Keep the static atmosphere on its own layer instead of repainting it on scroll. */
+body::before { content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none; background-image: var(--canvas-atmosphere); transform: translateZ(0); }
 .app-shell { min-height: 100dvh; }
 .app-main { min-height: 100dvh; margin-left: var(--sidebar); }
 .sidebar {
   inset: 24px auto 24px 24px; width: 216px; padding: 25px 14px 17px;
   background: var(--glass); border: var(--rim); border-radius: 26px;
-  backdrop-filter: blur(28px) saturate(120%); -webkit-backdrop-filter: blur(28px) saturate(120%);
+  backdrop-filter: blur(12px) saturate(120%); -webkit-backdrop-filter: blur(12px) saturate(120%);
   box-shadow: var(--glass-shadow); overflow-y: auto;
 }
 .identity { margin: 0 12px 32px; gap: 12px; }
@@ -41,9 +44,9 @@ nav a[aria-current=page] img { opacity: 1; }
 .sidebar-bottom { padding-top: 28px; }
 .settings { color: #626e67; font-size: .8rem; border-radius: 12px; font-weight: 450; }
 .toolbar {
-  top: 0; min-height: 88px; padding: 22px 48px; border: 0; background: rgb(240 242 237 / .65);
-  backdrop-filter: blur(22px); -webkit-backdrop-filter: blur(22px);
-  -webkit-mask-image: linear-gradient(#000 82%, transparent); mask-image: linear-gradient(#000 82%, transparent);
+  top: 0; min-height: 88px; padding: 22px 48px; border: 0;
+  background: linear-gradient(rgb(var(--toolbar-surface) / .97) 75%, rgb(var(--toolbar-surface) / 0));
+  backdrop-filter: none; -webkit-backdrop-filter: none;
 }
 .breadcrumb { font-size: .8rem; }
 .breadcrumb span:last-child { font-weight: 450; color: var(--secondary); }
@@ -69,7 +72,7 @@ button.create-choice {
   position: relative; flex-direction: row; align-items: center; justify-content: flex-start;
   gap: 14px; min-height: 98px; padding: 22px; border-radius: 22px;
   background: rgb(254 255 252 / .67); border: var(--rim); color: var(--text);
-  box-shadow: var(--glass-shadow); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+  box-shadow: var(--glass-shadow);
   text-align: left;
 }
 .create-choice .icon { width: 38px; height: 38px; padding: 9px; margin: 0; border-radius: 12px; background: #e0eae3; opacity: .88; filter: none; }
@@ -143,10 +146,11 @@ summary { font-size: .8rem; color: #4a7059; }
 .review-inspector { padding: 0 5px; }
 .inspector-section>p, .media-item>p { font-size: .78rem; }
 .answer, .document-paper .objective { border-radius: 12px; background: #eef2eb; }
-dialog { padding: 28px; border: var(--rim); border-radius: 26px; background: rgb(253 255 250 / .91); box-shadow: 0 4px 12px rgb(23 43 30 / .05), 0 36px 100px -24px rgb(23 43 30 / .27), inset 0 1px 0 white; backdrop-filter: blur(24px) saturate(115%); -webkit-backdrop-filter: blur(24px) saturate(115%); transform: translateY(6px) scale(.985); transition: opacity 140ms var(--curve), transform 140ms var(--curve), display 140ms allow-discrete, overlay 140ms allow-discrete; }
+dialog { padding: 28px; border: var(--rim); border-radius: 26px; background: rgb(253 255 250 / .98); box-shadow: 0 4px 12px rgb(23 43 30 / .05), 0 36px 100px -24px rgb(23 43 30 / .27), inset 0 1px 0 white; transform: translateY(6px) scale(.985); transition: opacity 140ms var(--curve), transform 140ms var(--curve), display 140ms allow-discrete, overlay 140ms allow-discrete; }
 dialog[open] { transform: translateY(0) scale(1); transition-duration: 220ms; }
+dialog { overscroll-behavior: contain; }
 @starting-style { dialog[open] { opacity: 0; transform: translateY(6px) scale(.985); } }
-dialog::backdrop { background: rgb(33 48 37 / .17); backdrop-filter: blur(4px); }
+dialog::backdrop { background: rgb(33 48 37 / .22); backdrop-filter: none; -webkit-backdrop-filter: none; }
 .dialog-top { gap: 14px; margin-bottom: 20px; }
 .dialog-top h2 { font-size: 1.25rem; min-width: 0; overflow-wrap: anywhere; }
 .source-chunk p { font-size: .82rem; }

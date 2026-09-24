@@ -16,7 +16,7 @@ from .store import dumps, now
 VERSION = 'job-progress-v1'
 MAX_EVENTS = 120
 RUN_ID = uuid.uuid4().hex
-STATUSES = {'pending', 'active', 'completed', 'failed', 'blocked'}
+STATUSES = {'pending', 'active', 'completed', 'failed', 'blocked', 'cancelled'}
 ACTIVITIES = {'retrieving', 'embedding', 'rewriting', 'reranking', 'planning',
     'writing', 'solving', 'reviewing', 'repairing', 'validating', 'saving',
     'generating_audio', 'generating_image', 'checking_evidence', 'searching_sources',
@@ -48,7 +48,7 @@ EVENT_FIELDS = {
     'question_format_adapted': {'number': 'integer', 'level': {'compatible'}},
     'task_succeeded': {}, 'task_failed': {}, 'task_blocked': {},
     'task_interrupted': {'cause': {'service_stop', 'restart'}},
-    'task_resumed': {},
+    'task_resumed': {}, 'task_cancelled': {}, 'task_cancel_requested': {},
 }
 
 
@@ -166,7 +166,7 @@ def _stored(db, job_id):
         if not _integer(event_seq) or event_seq < minimum:
             event_seq = minimum
         terminal = value.get('_terminal_status')
-        terminal = terminal if terminal in ('succeeded', 'failed', 'insufficient_evidence') else None
+        terminal = terminal if terminal in ('succeeded', 'failed', 'insufficient_evidence', 'cancelled') else None
         # Whitelist projection includes private timer fields only internally;
         # snapshot strips them before returning an HTTP result.
         return {'version': VERSION, 'recorded': True, 'stages': stages,
@@ -307,14 +307,14 @@ def finish(store, job_id, status, *, interruption=None):
         target = next((s for s in value['stages'] if s['id'] == value['active_stage']), None)
         if target:
             _stop(target, tick, at, interrupted=interruption == 'restart')
-            target['status'] = {'succeeded': 'completed', 'insufficient_evidence': 'blocked'}.get(status, 'failed')
+            target['status'] = {'succeeded': 'completed', 'insufficient_evidence': 'blocked', 'cancelled': 'cancelled'}.get(status, 'failed')
             if status == 'succeeded':
                 _append(value, target['id'], 'stage_completed', {}, at)
         stage = target['id'] if target else value['stages'][0]['id']
         if interruption in ('restart', 'service_stop'):
             _append(value, stage, 'task_interrupted', {'cause': interruption}, at)
         else:
-            code = {'succeeded': 'task_succeeded', 'insufficient_evidence': 'task_blocked'}.get(status, 'task_failed')
+            code = {'succeeded': 'task_succeeded', 'insufficient_evidence': 'task_blocked', 'cancelled': 'task_cancelled'}.get(status, 'task_failed')
             _append(value, stage, code, {}, at)
         value.update(activity=None, _terminal_status=status)
         _write(db, job_id, value)
@@ -333,7 +333,7 @@ def queued(db, job_id):
             # An active timer in a failed job means its stopping instant was
             # not checkpointed. Never count the pause before this resume.
             _stop(stage, tick, at, interrupted=True)
-        if stage['status'] in ('active', 'failed', 'blocked'):
+        if stage['status'] in ('active', 'failed', 'blocked', 'cancelled'):
             stage['status'] = 'pending'
     _append(value, target, 'task_resumed', {}, at)
     value.update(active_stage=None, activity=None, _terminal_status=None)
@@ -370,7 +370,7 @@ def _snapshot(store, job):
                 # an unknown stopping instant; preserve only checkpointed time.
                 _stop(stage, tick, now(), interrupted=True)
                 stage['status'] = {'succeeded': 'completed', 'failed': 'failed',
-                    'insufficient_evidence': 'blocked'}.get(status, 'pending')
+                    'insufficient_evidence': 'blocked', 'cancelled': 'cancelled'}.get(status, 'pending')
         stage.pop('_timer', None)
         stage.pop('_elapsed_ns', None)
     if status != 'running':

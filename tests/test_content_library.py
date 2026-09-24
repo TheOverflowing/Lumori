@@ -59,11 +59,14 @@ def test_unsuccessful_generation_has_course_context_without_a_phantom_material(r
     course, _, _ = seed_named(client, 'Generation result course')
     wire.mode = mode
     private_key = 'private-generation-request-key'
-    private_topic = 'A private learning objective which must not appear in job navigation metadata'
+    private_topic = 'A learning objective that is long enough to be shortened in Activity while the request payload stays private'
     job = done(client, client.post('/api/generations', json=request(course, private_key) | {'topic': private_topic}))
     assert job['status'] == status and job['course_id'] == course and job['content_id'] is None
     listed = next(row for row in client.get('/api/jobs', params={'course_id': course}).json() if row['id'] == job['id'])
     assert listed['status'] == status and listed['course_id'] == course and listed['content_id'] is None
+    assert listed['material'] == 'quiz' and listed['title'].startswith('A learning objective')
+    assert listed['title'].endswith('…') and len(listed['title']) <= 73
+    assert job['title'] == listed['title']
     assert client.get('/api/contents').json() == []
     public = json.dumps([job, listed])
     for private in ('payload', 'request_key', private_key, private_topic, 'test-key-not-real'):
@@ -86,11 +89,15 @@ def test_job_metadata_resolves_index_generation_and_failed_media_without_payload
     scoped = client.get('/api/jobs', params={'course_id': course}).json()
     assert {row['id'] for row in scoped} == set(expected)
     for row in scoped:
-        assert set(row) == {'id', 'kind', 'status', 'error', 'created_at', 'course_id', 'content_id'}
+        assert set(row) == {'id', 'kind', 'status', 'error', 'created_at', 'course_id', 'content_id', 'title', 'material'}
         assert row['course_id'] == course and row['content_id'] == expected[row['id']]
+        assert row['title']
+        assert row['material'] == ('quiz' if row['kind'] == 'generate' else None)
         detail = client.get('/api/jobs/' + row['id']).json()
         assert detail['course_id'] == course and detail['content_id'] == expected[row['id']]
-        assert set(detail) == set(row) | {'result', 'updated_at', 'timeline'}
+        assert set(detail) == set(row) | {'result', 'updated_at', 'timeline',
+                                         'cancellable', 'cancel_requested', 'partial_available'}
+        assert not detail['cancellable'] and not detail['cancel_requested'] and not detail['partial_available']
         timeline = detail['timeline']
         assert set(timeline) == {'version', 'recorded', 'stages', 'active_stage', 'activity',
             'completed', 'total', 'unit', 'updated_at', 'elapsed_ms', 'timing_complete',
@@ -127,14 +134,16 @@ def test_job_course_filter_is_applied_before_the_recent_job_limit(rig):
     first, _, index = seed_named(client, 'Older course')
     second = client.post('/api/courses', json={'name': 'Busy course'}).json()['id']
     empty = client.post('/api/courses', json={'name': 'Empty course'}).json()['id']
-    # Queue metadata directly in this isolated fixture; these jobs are not executed.
+    # Historical metadata still exercises filter-before-limit without filling
+    # the account's intentionally bounded active queue. No provider is called.
     for i in range(31):
-        app.state.store.job('limit-fixture-' + str(i), 'generate', {'course_id': second, 'topic': 'private pending objective'},
+        job, _ = app.state.store.job('limit-fixture-' + str(i), 'generate', {'course_id': second, 'topic': 'private pending objective'},
             owner_id=client.headers['X-Account-ID'])
+        app.state.store.execute("UPDATE jobs SET status='failed' WHERE id=?", (job['id'],))
     assert len(client.get('/api/jobs').json()) == 30
     scoped = client.get('/api/jobs', params={'course_id': first}).json()
     assert [row['id'] for row in scoped] == [index['id']]
     pending = client.get('/api/jobs', params={'course_id': second}).json()
     assert len(pending) == 30 and all(row['course_id'] == second and row['content_id'] is None for row in pending)
+    assert all(row['title'] == 'private pending objective' for row in pending)
     assert client.get('/api/jobs', params={'course_id': empty}).json() == []
-    assert 'private pending objective' not in json.dumps(pending)

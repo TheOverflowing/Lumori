@@ -44,10 +44,13 @@ BUSINESS_ROUTES = [
     ('GET', '/api/jobs/{jid}'),
     ('GET', '/api/jobs/{jid}/evidence'),
     ('POST', '/api/jobs/{jid}/resume'),
+    ('POST', '/api/jobs/{jid}/cancel'),
+    ('GET', '/api/jobs/{jid}/partial-content'),
     ('GET', '/api/jobs/{jid}/generation-request'),
     ('GET', '/api/contents'),
     ('GET', '/api/contents/{cid}'),
     ('POST', '/api/contents/{cid}/review'),
+    ('POST', '/api/contents/{cid}/questions/{slot_id}/revise'),
     ('POST', '/api/contents/{cid}/media'),
     ('GET', '/api/media/{mid}/file'),
     ('GET', '/api/media/{mid}/download'),
@@ -158,7 +161,7 @@ def populated(account_rig):
 @pytest.mark.parametrize('method,path', BUSINESS_ROUTES)
 def test_all_business_routes_require_a_session(tmp_path, method, path):
     app, wire = isolated_app(tmp_path)
-    path = path.format(did='unknown-document', jid='unknown-job', cid='unknown-content', mid='unknown-media', aid='unknown-asset')
+    path = path.format(did='unknown-document', jid='unknown-job', cid='unknown-content', mid='unknown-media', aid='unknown-asset', slot_id='q1')
     with TestClient(app) as client:
         result = client.request(method, path)
         assert result.status_code == 401, (method, path, result.text)
@@ -452,7 +455,8 @@ def test_job_account_filter_is_applied_before_recent_limit(account_rig):
     expected, _ = app.state.store.job('alice-one-job', 'generate', request(first_course, 'alice-one-job'), owner_id=first['user']['id'])
     for i in range(35):
         key = 'bob-busy-' + str(i)
-        app.state.store.job(key, 'generate', request(second_course, key), owner_id=second['user']['id'])
+        historical, _ = app.state.store.job(key, 'generate', request(second_course, key), owner_id=second['user']['id'])
+        app.state.store.execute("UPDATE jobs SET status='succeeded' WHERE id=?", (historical['id'],))
     assert [row['id'] for row in alice.get('/api/jobs').json()] == [expected['id']]
     assert len(bob.get('/api/jobs').json()) == 30
 

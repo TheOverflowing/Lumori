@@ -5,6 +5,8 @@ import hashlib
 from datetime import datetime, timezone
 from contextlib import contextmanager
 
+from .task_control import LocalCallLimit
+
 
 def uid(): return uuid.uuid4().hex
 
@@ -24,6 +26,7 @@ CREATE TABLE IF NOT EXISTS document_lifecycle(document_id TEXT PRIMARY KEY REFER
 CREATE TABLE IF NOT EXISTS document_options(document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE, options TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS figure_semantics(document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,asset_id TEXT NOT NULL,status TEXT NOT NULL,cache_key TEXT,description TEXT,vector TEXT,embedding_signature TEXT,error TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(document_id,asset_id));
 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,request_key TEXT UNIQUE NOT NULL,kind TEXT NOT NULL,payload TEXT NOT NULL,status TEXT NOT NULL,result TEXT,error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS job_controls(job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,cancel_requested_at TEXT);
 CREATE TABLE IF NOT EXISTS contents(id TEXT PRIMARY KEY,course_id TEXT NOT NULL REFERENCES courses(id),job_id TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,status TEXT NOT NULL,asset TEXT NOT NULL,sources TEXT NOT NULL,config TEXT NOT NULL,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS revisions(content_id TEXT NOT NULL,version INTEGER NOT NULL,asset TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(content_id,version));
 CREATE TABLE IF NOT EXISTS media(id TEXT PRIMARY KEY,content_id TEXT NOT NULL REFERENCES contents(id),version INTEGER NOT NULL,kind TEXT NOT NULL,path TEXT NOT NULL,mime TEXT NOT NULL,status TEXT NOT NULL,metadata TEXT NOT NULL,created_at TEXT NOT NULL);
@@ -54,6 +57,7 @@ class Conflict(Exception): pass
 
 class Store:
     def __init__(self, directory):
+        self.max_pending_jobs_per_account = 8
         directory.mkdir(parents=True, exist_ok=True)
         self.path = directory / 'studio.sqlite3'
         with self.connect() as db:
@@ -72,7 +76,7 @@ class Store:
         try:
             yield db
             db.commit()
-        except Exception:
+        except BaseException:
             db.rollback()
             raise
         finally: db.close()
@@ -83,6 +87,40 @@ class Store:
         rows=self.all(sql,args);return rows[0] if rows else None
     def execute(self, sql, args=()):
         with self.connect() as db: return db.execute(sql,args).rowcount
+
+    def job_control(self, job_id):
+        row = self.one('''SELECT j.status,c.cancel_requested_at FROM jobs j
+            LEFT JOIN job_controls c ON c.job_id=j.id WHERE j.id=?''', (job_id,))
+        if row is None: return None
+        requested = row['cancel_requested_at'] is not None
+        return {'cancel_requested': requested,
+                'cancellable': row['status'] in ('queued', 'running') and not requested}
+
+    def check_cancelled(self, job_id):
+        if not job_id: return
+        from .task_control import JobCancelled
+        row = self.one('''SELECT 1 FROM jobs j LEFT JOIN job_controls c ON c.job_id=j.id
+            WHERE j.id=? AND (j.status='cancelled' OR c.cancel_requested_at IS NOT NULL)''', (job_id,))
+        if row: raise JobCancelled()
+
+    def request_cancel(self, job_id):
+        """Caller checks account ownership. Repeated cancellation is idempotent."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT status FROM jobs WHERE id=?', (job_id,)).fetchone()
+            if row is None: return None
+            if row['status'] not in ('queued', 'running', 'cancelled'):
+                raise Conflict('任务已结束，无法取消。')
+            stamp = now()
+            db.execute('''INSERT INTO job_controls VALUES(?,?) ON CONFLICT(job_id)
+                DO UPDATE SET cancel_requested_at=COALESCE(job_controls.cancel_requested_at,excluded.cancel_requested_at)''', (job_id, stamp))
+            if row['status'] == 'queued':
+                db.execute("UPDATE jobs SET status='cancelled',error=NULL,updated_at=? WHERE id=?", (stamp, job_id))
+            status = 'cancelled' if row['status'] == 'queued' else row['status']
+            return {'status': status, 'cancel_requested': True, 'cancellable': False}
+
+    def clear_cancel_request(self, job_id):
+        self.execute('DELETE FROM job_controls WHERE job_id=?', (job_id,))
 
     @staticmethod
     def decode_chunk(row):
@@ -150,6 +188,11 @@ class Store:
                 return dict(old),False
             if preparation_id and db.execute('SELECT 1 FROM preparation_uses WHERE preparation_id=?',(preparation_id,)).fetchone():
                 raise Conflict('此次理解检查已用于生成，请重新检查。')
+            if owner_id is not None:
+                pending = db.execute('''SELECT count(*) FROM jobs j JOIN job_owners o ON o.job_id=j.id
+                    WHERE o.user_id=? AND j.status IN ('queued','running')''', (owner_id,)).fetchone()[0]
+                if pending >= self.max_pending_jobs_per_account:
+                    raise Conflict('当前账号等待或执行中的任务已达上限，请等待完成或取消部分任务。')
             row=dict(id=uid(),request_key=key,kind=kind,payload=encoded,status='queued',result=None,error=None,created_at=now(),updated_at=now())
             db.execute('INSERT INTO jobs VALUES(:id,:request_key,:kind,:payload,:status,:result,:error,:created_at,:updated_at)',row)
             if owner_id is not None:
@@ -161,11 +204,17 @@ class Store:
     def reserve_call(self, job_id, capability, model, limit):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            # Serialize cancellation with the accounting reservation. Calls that
+            # have already started remain metered; no refund is implied.
+            if job_id and db.execute('''SELECT 1 FROM jobs j LEFT JOIN job_controls c ON c.job_id=j.id
+                    WHERE j.id=? AND (j.status='cancelled' OR c.cancel_requested_at IS NOT NULL)''', (job_id,)).fetchone():
+                from .task_control import JobCancelled
+                raise JobCancelled()
             agent=db.execute('''SELECT json_extract(evidence,'$.configuration.max_calls') AS cap
                 FROM job_evidence WHERE job_id=? AND json_extract(evidence,'$.schema_version')='education-agent-v1' ''',(job_id,)).fetchone()
             if agent and type(agent['cap']) is int:
                 total=db.execute('SELECT count(*) FROM calls WHERE job_id=?',(job_id,)).fetchone()[0]
-                if total>=agent['cap']:raise ValueError('已达到本任务 API 调用上限；检索、失败请求及跨日续做均计入上限。')
+                if total>=agent['cap']:raise LocalCallLimit('已达到本任务 API 调用上限；检索、失败请求及跨日续做均计入上限。',scope='job')
             date=now()[:10]
             owner = db.execute('SELECT user_id FROM job_owners WHERE job_id=?', (job_id,)).fetchone()
             if owner:
@@ -174,7 +223,7 @@ class Store:
             else:
                 # Offline scripts retain their old global accounting semantics.
                 count=db.execute('SELECT count(*) FROM calls WHERE substr(created_at,1,10)=?',(date,)).fetchone()[0]
-            if count>=limit: raise ValueError('今日 API 调用次数已达到本地上限；次日 UTC 重置或调整配置。')
+            if count>=limit: raise LocalCallLimit('今日 API 调用次数已达到本地上限；次日 UTC 重置或调整配置。',scope='daily')
             call_id=uid()
             db.execute('INSERT INTO calls(id,job_id,capability,model,status,usage,created_at) VALUES(?,?,?,?,?,?,?)',(call_id,job_id,capability,model,'started','{}',now()))
             return call_id

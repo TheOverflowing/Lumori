@@ -127,6 +127,19 @@ test('a response from the previous page cannot update the new view after disposa
   assert.deepEqual(observer.errors, [], 'a stale success must not clear errors in another view');
 });
 
+test('leaving a view aborts its in-flight background fetch', async context => {
+  const pending=deferred();
+  let signal;
+  const observer=watch(context,{load:options=>{signal=options.signal;return pending.promise;}});
+  await advance(context,100);
+  assert.equal(signal.aborted,false);
+  observer.dispose();
+  assert.equal(signal.aborted,true);
+  pending.reject(Object.assign(new Error('Aborted'),{name:'AbortError'}));
+  await advance(context);
+  assert.deepEqual(observer.errors,[]);
+});
+
 test('a failed response after disposal does not report a stale error or restart polling', async context => {
   const pending = deferred();
   let loads = 0;

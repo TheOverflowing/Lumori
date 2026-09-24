@@ -38,12 +38,13 @@ def _covered(anchor, sources):
                and anchor['quote'] in source.get('text', '') for source in sources)
 
 
-def supplement_context(pipeline, request, selected, accepted):
+def supplement_context(pipeline, request, selected, accepted, *, missing_requirements=None):
     """Return ``(sources, audit)`` without provider calls or database mutations."""
     audit = configuration() | {'status': 'skipped', 'reason': 'no_valid_anchors',
         'valid_anchors': 0, 'ignored_anchors': 0, 'covered_anchors_before': 0,
         'covered_anchors_after': 0, 'selected_leaf_count': 0, 'included_leaf_count': 0,
-        'source_tokens': None, 'leaf_limit_reached': False}
+        'source_tokens': None, 'leaf_limit_reached': False,
+        'targeted_gap_ids': [], 'targeted_leaf_count': 0, 'targeted_included_leaf_count': 0}
     if not isinstance(accepted, list) or not accepted:
         return selected, audit
     if any(source.get('metadata', {}).get('source_kind') == 'figure' for source in selected):
@@ -143,10 +144,10 @@ def supplement_context(pipeline, request, selected, accepted):
             anchors.append({'document_id': item['document_id'], 'page': page, 'quote': quote,
                             'gap_id': gap, 'leaves': sorted(leaves, key=lambda row: _span(row))})
     audit['valid_anchors'] = len(anchors)
-    if not anchors:
+    if not anchors and not missing_requirements:
         return selected, audit
     audit['covered_anchors_before'] = sum(_covered(anchor, selected) for anchor in anchors)
-    if audit['covered_anchors_before'] == len(anchors):
+    if audit['covered_anchors_before'] == len(anchors) and not missing_requirements:
         audit.update(status='unchanged', reason='already_covered', covered_anchors_after=len(anchors))
         return selected, audit
 
@@ -181,6 +182,73 @@ def supplement_context(pipeline, request, selected, accepted):
                 row = dict(info['by_id'][identity], score=source.get('score', 0.0),
                            retrieval=source.get('retrieval', {'strategy': 'original_retrieval'}))
                 ranked.append(row); seen.add(identity)
+    targeted_ids = set()
+    if missing_requirements and len(ranked) < MAX_LEAF_HITS:
+        from .retrieval import bm25_scores
+        eligible = []
+        for item in accepted[:5]:
+            info = load_document(item.get('document_id')) if isinstance(item, dict) else None
+            if info:
+                eligible.extend(info['leaves'])
+        if eligible:
+            # Search the newly indexed originals for the frozen missing needs.
+            # The broad learning objective can rank an introductory passage
+            # above the section that actually explains a required subtopic.
+            headings = []
+            for row in eligible:
+                path = row.get('metadata', {}).get('heading_path')
+                headings.append(tuple(value for value in path if isinstance(value, str))
+                                if isinstance(path, list) else ())
+            bodies = [row['text'] for row in eligible]
+            queues = []
+            for gap in missing_requirements[:6]:
+                if not isinstance(gap, dict) or gap.get('covered') is not False:
+                    continue
+                query = ' '.join([gap.get('need', '')] + [part.get('query', '') for part in gap.get('queries', [])
+                    if isinstance(part, dict)])
+                if not query.strip():
+                    continue
+                body_scores = bm25_scores(bodies, query)
+                heading_scores = bm25_scores([' '.join(parts) for parts in headings], query)
+                body_max = max(body_scores, default=0) or 1
+                heading_max = max(heading_scores, default=0) or 1
+                sections = OrderedDict()
+                for index, row in enumerate(eligible):
+                    if row['id'] in seen or body_scores[index] <= 0 and heading_scores[index] <= 0:
+                        continue
+                    section = (row['document_id'], headings[index])
+                    sections.setdefault(section, []).append(index)
+                ranked_sections = sorted(sections.values(), key=lambda indexes: -max(
+                    2 * heading_scores[index] / heading_max + body_scores[index] / body_max for index in indexes))
+                queue = []
+                for indexes in ranked_sections[:4]:
+                    # A section heading and its first paragraph usually define
+                    # the concept; a later high-scoring paragraph can supply
+                    # details. Unheaded sources use their best body passages.
+                    best = sorted(indexes, key=lambda index: (-body_scores[index], index))
+                    choices = ([min(indexes), best[0]] if headings[indexes[0]] else best[:6])
+                    for index in choices:
+                        if eligible[index]['id'] not in {row['id'] for row in queue}:
+                            queue.append(eligible[index])
+                if queue:
+                    queues.append((gap.get('id'), queue))
+            while queues and len(ranked) < MAX_LEAF_HITS:
+                remaining = []
+                for gap_id, queue in queues:
+                    if not queue or len(ranked) >= MAX_LEAF_HITS:
+                        continue
+                    row = queue.pop(0)
+                    if row['id'] not in seen:
+                        ranked.append(row); seen.add(row['id']); targeted_ids.add(row['id'])
+                        if gap_id not in audit['targeted_gap_ids']:
+                            audit['targeted_gap_ids'].append(gap_id)
+                    if queue:
+                        remaining.append((gap_id, queue))
+                queues = remaining
+    audit['targeted_leaf_count'] = len(targeted_ids)
+    if audit['covered_anchors_before'] == len(anchors) and not targeted_ids:
+        audit.update(status='unchanged', reason='already_covered', covered_anchors_after=len(anchors))
+        return selected, audit
     audit['leaf_limit_reached'] = len(ranked) > MAX_LEAF_HITS
     ranked = ranked[:MAX_LEAF_HITS]
     result, tokens = rag_runtime.runtime_context(ranked, pages_by_document, counter,
@@ -192,7 +260,10 @@ def supplement_context(pipeline, request, selected, accepted):
     included = {cid for source in result for cid in source['metadata']['retrieved_chunk_ids']}
     audit.update(status='applied', reason='verified_anchors', selected_leaf_count=len(ranked),
                  included_leaf_count=len(included), source_tokens=tokens,
+                 targeted_included_leaf_count=len(targeted_ids & included),
                  covered_anchors_after=len(covered),
                  requirements_with_preserved_anchors=list(dict.fromkeys(anchor['gap_id'] for anchor in covered)),
                  requirements_with_missing_anchors=list(dict.fromkeys(anchor['gap_id'] for anchor in anchors if anchor not in covered)))
+    if targeted_ids & included:
+        audit['reason'] = 'verified_gap_recheck'
     return result, audit
