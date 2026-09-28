@@ -17,6 +17,29 @@
 .generation-progress-status { min-height: 5.2rem; }
 .generation-progress-status h1 { font-size: clamp(1.5rem, 2.4vw, 1.85rem); font-weight: 550; line-height: 1.35; letter-spacing: -.025em; text-wrap: balance; }
 .generation-counter { margin-top: .75rem; font-size: .88rem; font-variant-numeric: tabular-nums; }
+.generation-meter { margin: 1.15rem auto 1.5rem; max-width: 24rem; text-align: left; }
+.generation-meter-caption { display: flex; justify-content: space-between; flex-wrap: wrap; gap: .3rem .75rem; margin-bottom: .65rem; color: var(--secondary); font-size: .75rem; line-height: 1.5; font-variant-numeric: tabular-nums; }
+.generation-meter-caption > :first-child { color: var(--text); font-weight: 550; }
+.generation-meter-track { position: relative; height: 6px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, var(--progress-ink) 13%, transparent); }
+.generation-meter-fill { position: absolute; inset: 0; background: var(--progress-ink); border-radius: inherit; transform-origin: left center; transition: transform 280ms cubic-bezier(.22,1,.36,1); }
+.generation-meter-pending { display: none; position: absolute; inset: 0; width: 35%; border-radius: inherit; background: var(--progress-ink); opacity: .5; animation: generation-meter-wait 1.8s ease-in-out infinite alternate; }
+.generation-meter[data-determinate="false"] .generation-meter-pending { display: block; }
+.generation-progress-detailed .generation-meter { max-width: none; margin: .25rem 0 1.6rem; }
+.generation-progress[data-connection="interrupted"] .generation-meter-pending,
+.generation-progress:not([data-state="running"]) .generation-meter-pending { animation-play-state: paused; }
+.generation-progress:is([data-state="failed"], [data-state="insufficient_evidence"], [data-state="cancelled"]) .generation-meter-pending { display: none; }
+@keyframes generation-meter-wait { from { transform: translateX(0); } to { transform: translateX(185%); } }
+@media (prefers-reduced-motion: reduce) {
+  .generation-meter-fill { transition: none; }
+  .generation-meter-pending { animation: none; }
+}
+@media (prefers-contrast: more) {
+  .generation-meter-track { outline: 1px solid var(--text); outline-offset: 2px; }
+}
+@media (forced-colors: active) {
+  .generation-meter-track { outline: 1px solid CanvasText; background: Canvas; }
+  .generation-meter-fill, .generation-meter-pending { background: Highlight; forced-color-adjust: none; }
+}
 .generation-progress-message { margin: .2rem auto 1rem; max-width: 28rem; font-size: .85rem; text-wrap: pretty; }
 .generation-stages { text-align: left; list-style: none; padding: .55rem 0; margin: .65rem auto 1.8rem; max-width: 24rem; }
 .generation-stage { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; gap: .85rem; align-items: center; position: relative; min-height: 57px; color: var(--secondary); }

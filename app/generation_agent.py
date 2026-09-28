@@ -28,7 +28,7 @@ from .question_quality import (QuestionChecks, CONDITIONS, DIFFICULTY, CHECK_INS
     REVISION as QUALITY_REVISION, question_check_issues, solver_check_issues, tool_check_scope, review_boolean_issues)
 
 VERSION = 'education-agent-v1'
-PROMPT_REVISION = '20260922-quality-contract-v4'
+PROMPT_REVISION = '20260924-grounded-task-v6'
 HARNESS_QUALITY_REVISION = '20260919-correctness-first-v1'
 NOTE = 'Separate model calls; not independent model families, teacher validation or empirical learner difficulty. Tool results prove computations for their inputs, not correspondence with question prose.'
 
@@ -44,6 +44,7 @@ def orchestration_for_request(settings, request):
 REPAIR_POLICY = {'revision': 'question-repair-v2', 'minimum_rounds': 3,
                  'manual_extension_rounds': 3, 'format_compatibility': 'preserve_content_v1',
                  'quality_gates_relaxed': False}
+FAILURE_RECOVERY_REVISION = 'isolated-question-recovery-v1'
 NATIVE_ROLE_SCHEMA_REPAIR_POLICY = {
     'revision': 'native-role-schema-repair-v1', 'max_re_evaluations': 1,
     'eligible_output': 'complete_json_object', 'mode': 'fresh_re_evaluation',
@@ -135,15 +136,17 @@ def tool_prompt_view(results):
     return views
 
 
-def repairable_slot(state):
-    """Only an exhausted, recorded candidate loop can receive a manual extension."""
+def repairable_slots(state):
+    """Exhausted recorded candidate loops eligible for a manual extension."""
     if state.get('status') != 'quality_failed':
-        return None
-    slot = next((s for s in state.get('slots', []) if s.get('status') != 'passed'), None)
-    if (slot and slot.get('status') == 'failed' and slot.get('attempts') and
-            all(a.get('status') == 'rejected' for a in slot['attempts'])):
-        return slot
-    return None
+        return []
+    return [slot for slot in state.get('slots', []) if slot.get('status') == 'failed'
+            and slot.get('attempts') and all(a.get('status') == 'rejected' for a in slot['attempts'])]
+
+
+def repairable_slot(state):
+    slots = repairable_slots(state)
+    return slots[0] if slots else None
 
 
 def failure_reason(issues):
@@ -194,8 +197,8 @@ A previous upstream request may already have been billed.
         row = db.execute('SELECT evidence FROM job_evidence WHERE job_id=?', (job_id,)).fetchone()
         evidence = json.loads(row['evidence']) if row else {}
         state = evidence.get('agent', {})
-        repair = repairable_slot(state)
-        if not job or job['status'] not in ('failed', 'cancelled') or (repair is None and not resumable_interruption(state)):
+        repairs = repairable_slots(state)
+        if not job or job['status'] not in ('failed', 'cancelled') or (not repairs and not resumable_interruption(state)):
             raise ValueError('此任务没有可继续的中断步骤；请返回修改生成条件。')
         owner = db.execute('SELECT user_id FROM job_owners WHERE job_id=?', (job_id,)).fetchone()
         if owner:
@@ -212,7 +215,7 @@ A previous upstream request may already have been billed.
             if not isinstance(exploration_state, dict) or exploration_state.get('status') != 'complete':
                 raise ValueError('自动探索曾中断或记录不完整，请新建任务，避免重复可能已经计费的调用。')
         state['resume_count'] += 1
-        if repair is not None:
+        for repair in repairs:
             repair.setdefault('repair_extensions', []).append({
                 'start_attempt': len(repair['attempts']) + 1,
                 'rounds': REPAIR_POLICY['manual_extension_rounds'],
@@ -221,8 +224,8 @@ A previous upstream request may already have been billed.
         resource_resume = state.get('status') == 'call_limit'
         state['status'] = 'running'
         state.setdefault('resume_events', []).append({'at': now(),
-            'note': ('User explicitly requested three further candidate attempts; prior work and lifetime call limits remain.'
-                     if repair is not None else
+            'note': ('User explicitly requested three further candidate attempts per failed question; prior work and lifetime call limits remain.'
+                     if repairs else
                      'User explicitly resumed after a local daily call limit; completed work and lifetime call limits remain.'
                      if resource_resume else 'User explicitly retried; an interrupted upstream call may have been billed.')})
         db.execute('UPDATE job_evidence SET evidence=?,updated_at=? WHERE job_id=?', (dumps(evidence), now(), job_id))
@@ -450,7 +453,7 @@ class GenerationAgent:
                      ('source_kind', 'extraction_method', 'extraction_status', 'extraction_warnings')},
                  'original_image_provided': False} for s in self.evidence['sources']]
 
-    async def requirement_evidence(self, attempt, review, contract, system, brief, question):
+    async def requirement_evidence(self, attempt, review, contract, system, brief, question, *, allow_repair=True):
         """One fresh audit for an otherwise positive review with invalid quotes.
 
         A valid negative judgment is never retried here. Schema and contextual
@@ -472,7 +475,9 @@ class GenerationAgent:
                         and all(check.status == 'met' for check in review.requirement_checks)
                         and (not quality_policy or (not question_check_issues(question, review.question_checks, check_key=True)
                             and not any(x.strip() for x in review.explanation_issues))))
-            if (not positive or self.settings.harness_schema_repairs != 1 or
+            evidence_retry_enabled = (self.settings.harness_schema_repairs == 1 or
+                                      self.resilient_workers())
+            if (not allow_repair or not positive or not evidence_retry_enabled or
                     'review_schema_repair' in attempt):
                 raise
         phase = 'review_evidence_repair'
@@ -489,7 +494,8 @@ class GenerationAgent:
                 'Prior findings are not supplied or assumed correct. For met items copy exact contiguous '
                 'excerpts ONLY from question.stem and question.answer or question.explanation, never '
                 'from an independent solution, reference text, the brief, or your own new answer. '
-                'Preserve punctuation and wording; shorter literal excerpts are preferable to paraphrases. '
+                'Use one short 8-80 character substring per evidence field. Preserve punctuation, spacing '
+                'and wording exactly; do not join distant clauses, insert ellipses or paraphrase. '
                 'Use the exact requirement IDs and allowed source IDs. Return valid negative judgments '
                 'when warranted rather than manufacturing evidence to obtain a pass.'}
         self.save()
@@ -580,6 +586,14 @@ class GenerationAgent:
                 'revision': CPU_SPEC_REVISION, 'schema_sha256': fingerprint(cpu_spec_contract())}
         saved = self.store.one('SELECT evidence FROM job_evidence WHERE job_id=?', (self.job_id,))
         saved_config = json.loads(saved['evidence']).get('configuration', {}) if saved else {}
+        from .difficulty_shadow import policy as shadow_policy
+        observer_policy = shadow_policy(self.settings, saved_config if saved else None)
+        if observer_policy is not None:
+            config['difficulty_shadow'] = observer_policy
+        if (orchestration == 'supervisor_v2' and self.request.use_subagents is True and
+                (not saved or saved_config.get('orchestration', {}).get('failure_recovery') ==
+                 FAILURE_RECOVERY_REVISION)):
+            config['orchestration']['failure_recovery'] = FAILURE_RECOVERY_REVISION
         # A task created before parallel dispatch keeps its frozen serial
         # schedule. Changing its dispatch during resume would mix checkpoints.
         saved_dispatch = saved_config.get('orchestration', {}).get('dispatch')
@@ -692,7 +706,9 @@ class GenerationAgent:
         flexible = self.orchestration == 'supervisor_v2'
         if flexible:
             from .assessment_contracts import (FLEXIBLE_PLANNER_REVISION, FLEXIBLE_PLANNER_SYSTEM,
-                                               flexible_planner_contract, validate_flexible_plan)
+                                               flexible_planner_contract, validate_flexible_plan,
+                                               reconcile_flexible_plan_sources,
+                                               has_single_mixed_unknown_citation)
             PLANNER_REVISION, PLANNER_SYSTEM = FLEXIBLE_PLANNER_REVISION, FLEXIBLE_PLANNER_SYSTEM
         supervisor = self.state.setdefault('supervisor', {
             'revision': PLANNER_REVISION, 'status': 'planning', 'batches': [],
@@ -746,8 +762,61 @@ class GenerationAgent:
             self.state['phase'] = 'plan'; self.save()
             try:
                 raw = await self.call(batch, 'plan', contract, PLANNER_SYSTEM)
-                plan = (validate_flexible_plan if flexible else validate_question_plan)(raw, slots, self.request.question_type,
-                    {s['id'] for s in self.evidence['sources']})
+                validate_plan = validate_flexible_plan if flexible else validate_question_plan
+                source_ids = {s['id'] for s in self.evidence['sources']}
+                if flexible:
+                    raw, repairs = reconcile_flexible_plan_sources(
+                        raw, {s['id'] for s in contract['reference_chunks']})
+                    if repairs:
+                        batch['plan']['source_scope_reconciliation'] = repairs
+                        self.save()
+                try:
+                    plan = validate_plan(raw, slots, self.request.question_type, source_ids)
+                except ValidationError as exc:
+                    # Only a complete but schema-invalid Harness plan may be re-evaluated.
+                    # Keep the original response and never expose its proposed briefs as trusted feedback.
+                    if (not flexible or self.settings.agent_runtime != 'deepseek_harness' or
+                            self.settings.harness_schema_repairs != 1 or not isinstance(raw, dict)):
+                        raise
+                    errors = exc.errors(include_input=False, include_context=False, include_url=False)
+                    # A single invented citation mixed with a real citation may
+                    # get one fresh plan request. The invalid plan is never edited
+                    # or sent back as trusted feedback, and the new plan passes
+                    # the same complete validation below.
+                    citation_recheck = (
+                        len(errors) == 1 and errors[0]['type'] == 'value_error' and
+                        'Requirement citations must be a subset of brief citations.' in errors[0]['msg'] and
+                        has_single_mixed_unknown_citation(raw, {s['id'] for s in contract['reference_chunks']})
+                    )
+                    schema_recheck = bool(errors) and all(item['type'] in {
+                            'literal_error', 'missing', 'extra_forbidden', 'string_type',
+                            'list_type', 'dict_type', 'bool_type', 'int_type'} for item in errors)
+                    if not (citation_recheck or schema_recheck):
+                        raise
+                    repair_contract = deepcopy(contract)
+                    if citation_recheck:
+                        repair_contract['citation_recheck'] = {
+                            'instruction': 'Re-evaluate the original task and return a complete new plan. '
+                                'The prior plan cited one source ID absent from reference_chunks. '
+                                'Copy every source ID exactly from the supplied reference_chunks; '
+                                'do not abbreviate or invent IDs.'}
+                        repair_stage = 'plan_citation_repair'
+                    else:
+                        repair_contract['schema_recheck'] = {
+                            'instruction': 'Re-evaluate the original task and return a complete new plan. '
+                                'The prior JSON failed the supplied schema; do not copy its fields blindly.',
+                            'errors': [{'loc': [part for part in item['loc'] if type(part) in (str, int)],
+                                        'type': item['type']}
+                                       for item in errors[:6]],
+                        }
+                        repair_stage = 'plan_schema_repair'
+                    raw = await self.call(batch, repair_stage, repair_contract, PLANNER_SYSTEM)
+                    raw, repairs = reconcile_flexible_plan_sources(
+                        raw, {s['id'] for s in contract['reference_chunks']})
+                    if repairs:
+                        batch[repair_stage]['source_scope_reconciliation'] = repairs
+                        self.save()
+                    plan = validate_plan(raw, slots, self.request.question_type, source_ids)
                 values = [brief.model_dump() for brief in plan.questions]
                 # Previous batches are only compact orientation in the prompt;
                 # enforce exact duplicate plans across ALL batches locally.
@@ -847,6 +916,10 @@ class GenerationAgent:
         if adapted: content_config['format_compatibility'] = adapted
         if 'difficulty_acceptance' in self.evidence:
             content_config['difficulty_acceptance'] = self.evidence['difficulty_acceptance']
+        from .difficulty_shadow import observe
+        await observe(self, asset.model_dump())
+        self.check_scope()
+        self.check_cancelled()
         content_id = uid()
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -878,8 +951,14 @@ class GenerationAgent:
                        (dumps(self.evidence), now(), self.job_id))
         return {'content_id': content_id}
 
+    def resilient_workers(self):
+        return (self.evidence.get('configuration', {}).get('orchestration', {})
+                .get('failure_recovery') == FAILURE_RECOVERY_REVISION)
+
     async def run_question_workers(self, supervisor_mode):
         pending = [slot for slot in self.state['slots'] if slot['status'] != 'passed']
+        recoverable = self.resilient_workers()
+        failed_slots = []
         if not supervisor_mode or self.max_parallel_questions == 1:
             for slot in pending:
                 self.check_cancelled()
@@ -887,9 +966,16 @@ class GenerationAgent:
                 job_progress.event(self.store,self.job_id,'writing','question_started',
                     number=int(slot['slot_id'][1:]),total=len(self.state['slots']))
                 if supervisor_mode:
-                    await QuestionWorker(self, slot).run_question()
+                    try:
+                        await QuestionWorker(self, slot).run_question()
+                    except ValueError:
+                        if not recoverable or slot.get('status') != 'failed':
+                            raise
+                        failed_slots.append(slot['slot_id'])
                 else:
                     await self.fill_slot(slot)
+            if failed_slots:
+                raise ValueError('以下题目仍未通过逐题修复：' + ', '.join(failed_slots) + '。已通过题目已保留，可继续修复。')
             return
 
         # Only the host schedules workers. At most the configured number of
@@ -917,17 +1003,23 @@ class GenerationAgent:
                 # Let it checkpoint before surfacing the first failure; stop
                 # dispatching any new question as soon as a failure is known.
                 for task in sorted(done, key=lambda t: int(active[t]['slot_id'][1:])):
-                    active.pop(task)
+                    finished_slot = active.pop(task)
                     try:
                         task.result()
                     except BaseException as exc:
-                        if first_error is None:
+                        if (recoverable and isinstance(exc, ValueError) and
+                                finished_slot.get('status') == 'failed'):
+                            failed_slots.append(finished_slot['slot_id'])
+                        elif first_error is None:
                             first_error = exc
                 if first_error is None or getattr(self, 'continue_after_worker_failure', False):
                     while len(active) < self.max_parallel_questions and launch():
                         pass
             if first_error is not None:
                 raise first_error
+            if failed_slots:
+                raise ValueError('以下题目仍未通过逐题修复：' + ', '.join(sorted(failed_slots)) +
+                                 '。已通过题目已保留，可继续修复。')
         except BaseException:
             if active:
                 for task in active:
@@ -1082,6 +1174,11 @@ class GenerationAgent:
                 'For multiple_defensible questions give one defensible reference response, not an exclusive '
                 'marking key. Other supported interpretations or recommendations may also satisfy the criteria. '
                 'Separate source facts, supported inferences, assumptions, counterarguments and uncertainty. '
+                'Missing information does not establish that an event occurred or did not occur. '
+                'Write an actual reference response to the question, not only instructions describing a good response. '
+                'For hard questions require a justified choice under competing constraints or critical comparison '
+                'of plausible claims. Provide the necessary primary evidence, but do not put the worked '
+                'interpretations, conclusions or a step-by-step solution into the student-facing question. '
                 'Never fabricate quotations, historical events, author intentions or citations. '
                 'The learner sees only the stem, options and supporting sections before answering. '
                 'Include every required clue or source excerpt there; reference_chunks and reference answers '
@@ -1271,6 +1368,10 @@ class GenerationAgent:
                        'uncertain until tool results exist; the reviewer will resolve them.'
                        if quality_policy else ''), solution_model)
             except (ValidationError, ProviderOutputError):
+                if self.resilient_workers():
+                    self.reject(attempt, ['invalid_solver_output'], {
+                        'repair_action': 'Create one fresh, self-contained candidate so it can be solved independently.'})
+                    continue
                 attempt['status'] = 'protocol_failure'
                 self.mark_failure('protocol_failure')
                 raise ProviderError('独立解题响应结构无效，已停止；未自动重做整批题目。') from None
@@ -1366,8 +1467,9 @@ class GenerationAgent:
                 'Independently assess its meaning against the actual question AND its answer, not just word overlap. '
                 'Use met only if both the student-facing task and the delivered answer fully satisfy it; otherwise '
                 'use partial, missing or unsupported. For met, copy a verbatim stem_evidence span from stem and '
-                'a verbatim answer_evidence span from answer or explanation, each at least 8 characters, and '
+                'a verbatim answer_evidence span from answer or explanation, each 8-80 contiguous characters, and '
                 'specifically from question.stem and question.answer/question.explanation. Never quote '
+                'a paraphrase, join distant clauses, alter punctuation or use an ellipsis. '
                 'independent_solution as evidence of what the candidate actually says. '
                 'cite IDs allowed by that requirement, question and supplied sources. Never invent a quotation. '
                 'Give a short explanation of the evidence and any gap. Do not give credit for facts present '
@@ -1418,6 +1520,10 @@ class GenerationAgent:
             try:
                 review = await self.checked_role_call(attempt, 'review', review_contract, review_system, review_model)
             except (ValidationError, ProviderOutputError):
+                if self.resilient_workers():
+                    self.reject(attempt, ['invalid_review_output'], {
+                        'repair_action': 'Create one fresh candidate and independently review its actual answer.'})
+                    continue
                 attempt['status'] = 'protocol_failure'
                 if harness_quality:
                     attempt['quality_checks']['correctness']['issues'] = ['invalid_review_output']
@@ -1428,14 +1534,24 @@ class GenerationAgent:
             if flexible:
                 try:
                     review, coverage_issues = await self.requirement_evidence(
-                        attempt, review, review_contract, review_system, brief, q)
+                        attempt, review, review_contract, review_system, brief, q,
+                        allow_repair=not difficulty_issues)
                 except (ValueError, ProviderOutputError):
                     if self.execution_status() != 'running':
                         raise
                     checks = [check.model_dump() for check in review.requirement_checks]
                     attempt['quality_checks']['requirements'] = {'status': 'failed',
                         'issues': ['invalid_requirement_check_evidence'], 'checks': checks}
-                    self.reject(attempt, ['invalid_requirement_check_evidence'])
+                    self.reject(attempt, ['invalid_requirement_check_evidence'] + difficulty_issues, {
+                        'repair_action': 'Write one fresh candidate whose question and answer each visibly satisfy '
+                                         'the assigned requirements; cite only exact text in that candidate. '
+                                         + ('Redesign the cognitive task for the requested difficulty: require '
+                                            'weighing alternatives under concrete constraints, and remove worked '
+                                            'answers from student-visible hints while retaining all necessary inputs.'
+                                            if difficulty_issues else ''),
+                        'difficulty': attempt['quality_checks'].get('difficulty', {})})
+                    if self.resilient_workers():
+                        continue
                     self.mark_failure('protocol_failure')
                     raise ProviderError('逐项复核缺少有效的题目或答案引文，已停止；未据此发布内容。') from None
                 checks = [check.model_dump() for check in review.requirement_checks]

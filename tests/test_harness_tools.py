@@ -175,7 +175,7 @@ def test_invalid_model_parameters_are_sanitized_and_audited(scoped, payload):
     result = ScopedTeachingTools(manifest).cpu_schedule_v1(payload)
     assert result['error']['code'] == 'invalid_input'
     assert result == {'ok': False, 'error': {'code': 'invalid_input',
-        'message': 'Invalid cpu_schedule_v1 input; follow the published tool schema.'}}
+        'message': 'Invalid teaching tool input; follow the published tool schema.'}}
     assert read_audit(manifest)[0]['input'] == payload
 
 

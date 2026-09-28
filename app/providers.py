@@ -160,8 +160,18 @@ class ApiProviders:
     def _text_object(data):
         try:
             choice=data['choices'][0]
-            if choice.get('finish_reason') in ('length','content_filter'):raise ValueError()
+            if choice.get('finish_reason') == 'length':
+                raise ProviderOutputError('文本输出达到 token 上限，未得到完整结果；本次未自动重试。',
+                                          code='output_token_limit')
+            if choice.get('finish_reason') == 'content_filter':
+                raise ProviderOutputError('文本输出被上游过滤，未得到完整结果；本次未自动重试。',
+                                          code='output_filtered')
+            if choice.get('finish_reason') in ('aborted', 'insufficient_system_resource', 'tool_calls'):
+                raise ProviderOutputError('文本 API 未正常完成最终内容；本次未自动重试。',
+                                          code='output_interrupted')
             text=choice['message']['content'].strip()
+            if not text:
+                raise ProviderOutputError('文本 API 未返回最终内容；本次未自动重试。', code='empty_output')
             if text.startswith('```'):
                 lines=text.splitlines();text='\n'.join(lines[1:-1])
             result=json.loads(text)
@@ -170,7 +180,8 @@ class ApiProviders:
             json.dumps(result,allow_nan=False)
             return result
         except (KeyError,IndexError,AttributeError,TypeError,ValueError):
-            raise ProviderOutputError('文本 API 未返回完整 JSON 对象；请检查模型的结构化输出能力。') from None
+            raise ProviderOutputError('文本 API 未返回完整 JSON 对象；请检查模型的结构化输出能力。',
+                                      code='invalid_json_object') from None
 
     async def speech(self,text,job_id):
         data=await self.call('speech',{'input':text,'voice':self.settings.voice,'response_format':'mp3'},job_id,binary=True)

@@ -108,7 +108,7 @@ export function bindDifficultyPresets(form, draft, update) {
 }
 
 export function generationPayload(draft) {
-  const {difficulty_mode, difficulty_counts, lesson_difficulty, learner_profile_is_default, ...payload} = draft;
+  const {difficulty_mode, difficulty_counts, lesson_difficulty, learner_profile_is_default, check_missing_details, ...payload} = draft;
   payload.difficulty = draft.material === 'lesson' ? lesson_difficulty : draft.difficulty;
   payload.difficulty_distribution = draft.material !== 'lesson' && difficulty_mode === 'distribution'
     ? Object.fromEntries(levels.map(level=>[level,Number(difficulty_counts[level])])) : null;
@@ -126,7 +126,38 @@ export function renderDifficultyAssessment(content) {
   if (!content.asset.questions.length) return `<section class="inspector-section difficulty-assessment"><h2>${m('讲解深度')}</h2><p>${m(names[content.config?.difficulty] || '未记录')}</p></section>`;
   const assessment = content.difficulty_assessment;
   const status = content.version > 1 && ['model_checked','model_adjusted'].includes(assessment?.status) ? 'needs_review' : assessment?.status || 'legacy_unverified';
-  return `<section class="inspector-section difficulty-assessment"><h2>${m('难度控制')}</h2><p class="difficulty-assessment-status">${m({model_checked:'模型已检查，待教师判断',model_adjusted:'已保留结果，难度有偏差',needs_review:'当前版本需要重新判断难度',legacy_unverified:'旧材料尚无逐题难度检查'}[status] || '当前版本需要重新判断难度')}</p>${status === 'model_adjusted' ? `<details class="difficulty-adjustment-detail"><summary>${m('校准记录')}</summary><p>${m('已尝试按目标难度调整，保留了通过内容检查的结果；目标难度与模型判断分别显示。')}</p><p>${m('这份结果未严格匹配目标难度，仍需人工核对。')}</p></details>` : ''}${content.config?.learner_profile?`<p>${m('目标学生与已学基础')}<br>${escape(content.config.learner_profile)}</p>`:''}</section>`;
+  const shadow=content.difficulty_shadow;
+  let shadowNotice='';
+  if(shadow?.matches_current_content === false) {
+    shadowNotice=`<p class="difficulty-shadow-stale">${m('旁路评审对应旧版本，当前题目需要重新复核。')}</p>`;
+  } else if(shadow?.matches_current_content === true) {
+    const notices=[];
+    for(const observed of shadow.questions || []) {
+      const index=content.asset.questions.findIndex(q=>q.slot_id===observed.slot_id);
+      if(index<0)continue;
+      const flags=observed.review_flags || [];
+      const candidates=(observed.candidates || []).map(level=>t(names[level] || '无法判断')).join(' / ');
+      if(observed.decision?.status === 'content_issue') {
+        notices.push(`<li>${m('第 {n} 题：材料、答案或解释存在待核对的问题，请先检查内容。',{n:index+1})}</li>`);
+      } else if(['ungradable','insufficient_evidence'].includes(observed.decision?.status)) {
+        notices.push(`<li>${m('第 {n} 题：题目条件或评审证据不足，暂不判级。',{n:index+1})}</li>`);
+      } else if(observed.decision?.status === 'unavailable') {
+        notices.push(`<li>${m('第 {n} 题：评审未完整完成，暂不采纳难度判断。',{n:index+1})}</li>`);
+      } else if(flags.includes('published_grade_outside_candidates')) {
+        notices.push(`<li>${m('第 {n} 题：当前标注的难度未进入旁路评审候选，候选为 {candidates}。',{n:index+1,candidates})}</li>`);
+      } else if(flags.includes('difficulty_boundary')) {
+        notices.push(`<li>${m('第 {n} 题：旁路评审处于 {candidates} 边界。',{n:index+1,candidates})}</li>`);
+      } else if(observed.manual_review_recommended) {
+        notices.push(`<li>${m('第 {n} 题：旁路评审未能给出可直接使用的判断。',{n:index+1})}</li>`);
+      }
+    }
+    const coverage=shadow.coverage;
+    const coverageText=coverage ? `<p>${m('旁路已得到明确判级 {n} / {total} 题；未判级不表示通过。',{
+      n:Number.isInteger(coverage.assessed_questions)?coverage.assessed_questions:0,
+      total:content.asset.questions.length})}</p>` : '';
+    if(notices.length || coverageText)shadowNotice=`<div class="difficulty-shadow-notice"><strong>${m(notices.length?'旁路评审建议人工复核':'旁路评审记录')}</strong>${coverageText}${notices.length?`<ul>${notices.join('')}</ul>`:''}<p>${m('旁路意见不会自动改题或更改原有判定。')}</p></div>`;
+  }
+  return `<section class="inspector-section difficulty-assessment"><h2>${m('难度控制')}</h2><p class="difficulty-assessment-status">${m({model_checked:'模型已检查，待教师判断',model_adjusted:'已保留结果，难度有偏差',needs_review:'当前版本需要重新判断难度',legacy_unverified:'旧材料尚无逐题难度检查'}[status] || '当前版本需要重新判断难度')}</p>${status === 'model_adjusted' ? `<details class="difficulty-adjustment-detail"><summary>${m('校准记录')}</summary><p>${m('已尝试按目标难度调整，保留了通过内容检查的结果；目标难度与模型判断分别显示。')}</p><p>${m('这份结果未严格匹配目标难度，仍需人工核对。')}</p></details>` : ''}${shadowNotice}${content.config?.learner_profile?`<p>${m('目标学生与已学基础')}<br>${escape(content.config.learner_profile)}</p>`:''}</section>`;
 }
 
 export function renderQuestionDifficultyEvaluation(content, saved = []) {

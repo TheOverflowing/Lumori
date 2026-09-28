@@ -99,6 +99,14 @@ def test_catalog_does_not_fabricate_coverage_or_substring_match():
     assert any('processes-and-concurrency' in row['url'] for row in rows)
 
 
+def test_python_list_definition_gap_finds_licensed_intro_source():
+    query = 'Python list definition ordered mutable create index elements syntax'
+    rows = run(sources.search(settings(), query, language='en'))
+    assert rows[0]['url'] == 'https://docs.python.org/3/tutorial/introduction.html'
+    assert rows[0]['storage_policy'] == 'open_license'
+    assert rows[0]['license'] == 'Python documentation license (PSF)'
+
+
 @pytest.mark.parametrize('query', [
     'machine learning workflow and training process',
     'Explain the process of machine learning model evaluation',

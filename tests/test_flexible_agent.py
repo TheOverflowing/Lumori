@@ -110,6 +110,9 @@ def flexible_wire(monkeypatch):
                 options['author_mutation'](value, contract)
         if task == 'agent_solve':
             value['answer'] = 'SOLVER DEFENDS A DIFFERENT PRIORITY WITH VALID REASONS.'
+            if options.get('solver_mutation'):
+                position, _ = AgentWire.identity(contract)
+                options['solver_mutation'](value, contract, self.stage_counts[(task, position)])
         if task == 'agent_review':
             position, _ = AgentWire.identity(contract)
             brief = options['briefs'][f'q{position}']
@@ -153,6 +156,71 @@ def test_request_opt_in_runs_native_per_question_workers(agent_case, flexible_wi
     assert rig.asset()['sections'] == []
     assert [entry['task'] for entry in rig.wire.contracts].count('agent_plan') == 1
     assert rig.text_call_count() == 7
+
+
+def test_opt_in_harness_repairs_invalid_review_evidence_before_reauthoring(
+        agent_case, offline_harness, flexible_wire):
+    def invalid_first_q1_review(value, contract, count):
+        if AgentWire.identity(contract)[0] == 1 and count == 1:
+            wrong_solver_quote_once(value, contract, count)
+
+    flexible_wire['review_mutation'] = invalid_first_q1_review
+    rig = flexible_case(agent_case, count=2, settings_options={'harness_schema_repairs': 0})
+    payload = json.loads(rig.job()['payload']) | {'material': 'quiz', 'use_subagents': True}
+    rig.store.execute('UPDATE jobs SET payload=? WHERE id=?', (dumps(payload), rig.job_id))
+
+    assert rig.run()['status'] == 'succeeded', rig.job()
+    slots = rig.evidence()['agent']['slots']
+    assert [slot['status'] for slot in slots] == ['passed', 'passed']
+    assert 'review_evidence_repair' in slots[0]['attempts'][0]
+    assert rig.evidence()['configuration']['orchestration']['failure_recovery'] == (
+        generation_agent.FAILURE_RECOVERY_REVISION)
+
+
+def test_opt_in_negative_review_reauthors_without_evidence_recheck(
+        agent_case, offline_harness, flexible_wire):
+    def reject_first_candidate(value, contract, count):
+        if count == 1:
+            value['requirement_checks'][0].update(status='missing', stem_evidence='',
+                                                  answer_evidence='', source_ids=[])
+
+    flexible_wire['review_mutation'] = reject_first_candidate
+    rig = flexible_case(agent_case, count=1, settings_options={'harness_schema_repairs': 0})
+    payload = json.loads(rig.job()['payload']) | {'material': 'quiz', 'use_subagents': True}
+    rig.store.execute('UPDATE jobs SET payload=? WHERE id=?', (dumps(payload), rig.job_id))
+
+    assert rig.run()['status'] == 'succeeded', rig.job()
+    assert 'review_evidence_repair' not in offline_harness
+    assert [attempt['status'] for attempt in rig.evidence()['agent']['slots'][0]['attempts']] == [
+        'rejected', 'passed']
+
+
+def test_opt_in_exhausted_questions_continue_and_resume_together(
+        agent_case, offline_harness, flexible_wire):
+    def invalid_first_three_q1_q2_candidates(value, contract, count):
+        if AgentWire.identity(contract)[0] in (1, 2) and count <= 6:
+            value['requirement_checks'][0]['answer_evidence'] = 'INVENTED_CANDIDATE_QUOTE'
+
+    flexible_wire['review_mutation'] = invalid_first_three_q1_q2_candidates
+    rig = flexible_case(agent_case, count=3, settings_options={'harness_schema_repairs': 0})
+    payload = json.loads(rig.job()['payload']) | {'material': 'quiz', 'use_subagents': True}
+    rig.store.execute('UPDATE jobs SET payload=? WHERE id=?', (dumps(payload), rig.job_id))
+
+    assert rig.run()['status'] == 'failed'
+    assert not rig.contents()
+    slots = rig.evidence()['agent']['slots']
+    assert [slot['status'] for slot in slots] == ['failed', 'failed', 'passed']
+    assert all(len(slot['attempts']) == 3 for slot in slots[:2])
+    assert rig.evidence()['agent']['status'] == 'quality_failed'
+    saved_q3 = copy.deepcopy(slots[2])
+
+    authorize_resume(rig.store, rig.job_id)
+    resumed = rig.evidence()['agent']['slots']
+    assert [slot['status'] for slot in resumed] == ['pending', 'pending', 'passed']
+    assert [slot['repair_extensions'][0]['start_attempt'] for slot in resumed[:2]] == [4, 4]
+    assert rig.run()['status'] == 'succeeded', rig.job()
+    assert rig.evidence()['agent']['slots'][2] == saved_q3
+    assert [question['slot_id'] for question in rig.asset()['questions']] == ['q1', 'q2', 'q3']
 
 
 @pytest.mark.parametrize('limit,count', [(1, 3), (2, 3), (3, 3), (4, 4), (20, 40), (40, 40)])
@@ -421,6 +489,91 @@ def test_plan_requirement_cannot_expand_source_scope(agent_case, offline_harness
     assert not rig.contents()
 
 
+def test_harness_replans_once_for_one_mixed_unknown_citation(
+        agent_case, offline_harness, flexible_wire):
+    attempts = 0
+
+    def invent_one_citation(value, contract):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            value['questions'][0]['requirements'][0]['source_ids'].append('invented-source')
+
+    flexible_wire['plan_mutation'] = invent_one_citation
+    rig = flexible_case(agent_case, count=1, settings_options={'harness_schema_repairs': 1})
+    assert rig.run()['status'] == 'succeeded', rig.job()
+    assert attempts == 2
+    assert offline_harness[:2] == ['plan', 'plan_citation_repair']
+    batch = rig.evidence()['agent']['supervisor']['batches'][0]
+    assert 'invented-source' in batch['plan']['response']['questions'][0]['requirements'][0]['source_ids']
+    assert batch['plan_citation_repair']['response']['questions'][0]['requirements'][0]['source_ids'] == [SOURCE['id']]
+    assert rig.text_call_count() == 5
+
+
+def test_harness_stops_after_second_mixed_unknown_citation(
+        agent_case, offline_harness, flexible_wire):
+    flexible_wire['plan_mutation'] = lambda value, contract: value['questions'][0]['requirements'][0][
+        'source_ids'].append('invented-source')
+    rig = flexible_case(agent_case, count=1, settings_options={'harness_schema_repairs': 1})
+    assert rig.run()['status'] == 'failed'
+    assert offline_harness == ['plan', 'plan_citation_repair']
+    assert rig.text_call_count() == 2
+    assert not rig.contents()
+
+
+def test_plan_reconciles_only_omitted_root_source_and_records_it(
+        agent_case, offline_harness, flexible_wire):
+    flexible_wire['plan_mutation'] = lambda value, contract: value['questions'][0].update(source_ids=[])
+    rig = flexible_case(agent_case, count=1)
+    assert rig.run()['status'] == 'succeeded', rig.job()
+    assert offline_harness == ['plan', 'author', 'solve', 'review']
+    batch = rig.evidence()['agent']['supervisor']['batches'][0]
+    assert batch['plan']['response']['questions'][0]['source_ids'] == []
+    assert batch['plan']['source_scope_reconciliation'] == [
+        {'slot_id': 'q1', 'added_source_ids': [SOURCE['id']]}]
+    assert batch['status'] == 'validated'
+
+
+def test_harness_replans_once_after_requirement_kind_schema_error(
+        agent_case, offline_harness, flexible_wire):
+    attempts = 0
+
+    def invalid_first_kind(value, contract):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            value['questions'][0]['requirements'][0]['kind'] = 'argument_with_counterargument'
+
+    flexible_wire['plan_mutation'] = invalid_first_kind
+    rig = flexible_case(agent_case, count=1, settings_options={'harness_schema_repairs': 1})
+    assert rig.run()['status'] == 'succeeded', rig.job()
+    assert attempts == 2
+    assert offline_harness[:2] == ['plan', 'plan_schema_repair']
+    batch = rig.evidence()['agent']['supervisor']['batches'][0]
+    assert batch['plan']['response']['questions'][0]['requirements'][0]['kind'] == 'argument_with_counterargument'
+    assert batch['plan_schema_repair']['response']['questions'][0]['requirements'][0]['kind'] == 'reasoning'
+    assert rig.text_call_count() == 5
+
+
+def test_harness_invalid_replan_stops_before_workers(agent_case, offline_harness, flexible_wire):
+    flexible_wire['plan_mutation'] = lambda value, contract: value['questions'][0]['requirements'][0].update(
+        kind='argument_with_counterargument')
+    rig = flexible_case(agent_case, count=1, settings_options={'harness_schema_repairs': 1})
+    assert rig.run()['status'] == 'failed'
+    assert offline_harness == ['plan', 'plan_schema_repair']
+    assert rig.text_call_count() == 2
+    assert not rig.contents()
+
+
+def test_harness_plan_repair_respects_disabled_setting(agent_case, offline_harness, flexible_wire):
+    flexible_wire['plan_mutation'] = lambda value, contract: value['questions'][0]['requirements'][0].update(
+        kind='argument_with_counterargument')
+    rig = flexible_case(agent_case, count=1)
+    assert rig.run()['status'] == 'failed'
+    assert offline_harness == ['plan']
+    assert rig.text_call_count() == 1
+
+
 def test_cpu_composition_appends_to_base_and_is_visible_to_blind_solver(
         agent_case, offline_harness, flexible_wire):
     rig = flexible_case(agent_case, cpu=True, count=1)
@@ -584,6 +737,19 @@ def test_difficulty_mismatch_requires_new_author_even_when_requirements_are_met(
     assert rig.run()['status'] == 'succeeded', rig.job()
     assert rig.wire.author_counts[1] == 2
     assert 'difficulty_mismatch' in rig.evidence()['agent']['slots'][0]['attempts'][0]['feedback']['issues']
+
+
+def test_difficulty_mismatch_does_not_spend_call_repairing_invalid_quotes(
+        agent_case, offline_harness, flexible_wire):
+    flexible_wire['solver_mutation'] = lambda value, contract, count: value.update(assessed_difficulty='easy')
+    flexible_wire['review_mutation'] = lambda value, contract, count: value['requirement_checks'][0].update(
+        answer_evidence='This quote is absent from the delivered candidate answer.')
+    rig = flexible_case(agent_case, count=1, settings_options={'agent_max_repairs': 0})
+    assert rig.run()['status'] == 'failed'
+    assert offline_harness == ['plan', 'author', 'solve', 'review']
+    attempt = rig.evidence()['agent']['slots'][0]['attempts'][0]
+    assert set(attempt['feedback']['issues']) == {'difficulty_mismatch', 'invalid_requirement_check_evidence'}
+    assert not rig.contents()
 
 
 def test_fake_quote_is_semantic_rejection_not_schema_retry(agent_case, offline_harness, flexible_wire):

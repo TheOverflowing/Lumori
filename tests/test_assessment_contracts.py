@@ -6,7 +6,8 @@ import pytest
 
 from app.assessment_contracts import (AssessmentBrief, AssessmentPlan, AssessmentRequirement, CpuNarrative,
     FLEXIBLE_PLANNER_REVISION, FLEXIBLE_PLANNER_SYSTEM, REQUIREMENT_COVERAGE_NOTE, RequirementCheck,
-    flexible_planner_contract, validate_flexible_plan, validate_requirement_checks)
+    flexible_planner_contract, validate_flexible_plan, validate_requirement_checks,
+    reconcile_flexible_plan_sources)
 from app.models import GenerateRequest, Question
 
 
@@ -51,6 +52,24 @@ def test_valid_flexible_plan_and_coverage_return_typed_plan_and_no_issues():
     assert coverage(brief=result.questions[0], question=Question.model_validate(QUESTION)) == []
     assert coverage(sources={'source-en', 'source-zh'}) == []
     assert 'semantic' in REQUIREMENT_COVERAGE_NOTE
+
+
+def test_reconcile_only_a_requirement_source_already_supplied_to_planner():
+    brief = deepcopy(BRIEF)
+    brief['source_ids'] = ['source-en']
+    brief['requirements'][0]['source_ids'] = ['source-zh']
+    raw = {'questions': [brief]}
+    with pytest.raises(ValueError, match='subset'):
+        validate_flexible_plan(raw, SLOTS, 'short_answer', {'source-en', 'source-zh'})
+    repaired, changes = reconcile_flexible_plan_sources(raw, {'source-en', 'source-zh'})
+    assert changes == [{'slot_id': 'q1', 'added_source_ids': ['source-zh']}]
+    assert repaired['questions'][0]['source_ids'] == ['source-en', 'source-zh']
+    assert raw['questions'][0]['source_ids'] == ['source-en']
+    assert validate_flexible_plan(repaired, SLOTS, 'short_answer', {'source-en', 'source-zh'})
+    rejected, changes = reconcile_flexible_plan_sources(raw, {'source-en'})
+    assert rejected == raw and not changes
+    with pytest.raises(ValueError, match='subset'):
+        validate_flexible_plan(rejected, SLOTS, 'short_answer', {'source-en'})
 
 
 @pytest.mark.parametrize('field,value', [
@@ -139,6 +158,8 @@ def test_flexible_contract_keeps_capabilities_and_provenance_without_past_answer
     assert 'authoritative hard boundary' in FLEXIBLE_PLANNER_SYSTEM
     assert 'multiple_defensible' in FLEXIBLE_PLANNER_SYSTEM
     assert 'preferred conclusion' in FLEXIBLE_PLANNER_SYSTEM
+    assert 'argument_with_counterargument must use reasoning or comparison' in FLEXIBLE_PLANNER_SYSTEM
+    assert 'argument_with_counterargument is not a requirement kind' in contract['output_contract']
     with pytest.raises(ValueError, match='capabilities'):
         flexible_planner_contract(request, SLOTS, SOURCES, [], {})
 

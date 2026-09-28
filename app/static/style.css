@@ -304,6 +304,9 @@ body[data-input=keyboard] button, body[data-input=keyboard] dialog { transition:
 .question-difficulty-detail p { font-size: .75rem; }
 .question-difficulty-detail ol { margin: 0; padding-left: 18px; font-size: .73rem; }
 .difficulty-assessment-status { color: var(--text); }
+.difficulty-shadow-notice { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--quiet); font-size: .73rem; line-height: 1.6; }
+.difficulty-shadow-notice ul { margin: 7px 0; padding-left: 20px; }
+.difficulty-shadow-notice p, .difficulty-shadow-stale { color: var(--secondary); font-size: .71rem; }
 .difficulty-evaluation { margin-top: 23px; padding-top: 18px; border-top: 1px solid var(--line); }
 .difficulty-evaluation legend { float: left; width: 100%; margin-bottom: 8px; font-size: .75rem; }
 .difficulty-evaluation p { clear: both; font-size: .7rem; }

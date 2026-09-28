@@ -212,6 +212,78 @@ def test_real_runtime_runner_with_both_teaching_tools_and_mock_provider(tmp_path
     assert 'mock-private-model-key' not in json.dumps(report)
 
 
+@integration
+def test_real_runtime_search_tool_uses_parent_callback_and_audit(tmp_path):
+    requests = []
+    searched = []
+
+    def wire(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        tool_messages = [message for message in body['messages'] if message['role'] == 'tool']
+        if not tool_messages:
+            assert {tool['function']['name'] for tool in body['tools']} == {
+                'mcp__teaching__search_web'}
+            return httpx.Response(200, json=completion(calls=[{
+                'id': 'search-1', 'type': 'function', 'function': {
+                    'name': 'mcp__teaching__search_web',
+                    'arguments': json.dumps({'query': 'public scheduling concept', 'language': 'en'})}}]))
+        result = json.loads(tool_messages[0]['content'])
+        assert result['ok'] is True
+        assert result['candidates'][0]['url'] == 'https://example.edu/lesson'
+        return httpx.Response(200, json=completion('{"searched":true}'))
+
+    async def search(query, language):
+        searched.append((query, language))
+        return [{'url': 'https://example.edu/lesson', 'title': 'Course page'}]
+
+    agent = make_agent(tmp_path, wire)
+    report = {}
+
+    async def exercise():
+        try:
+            return await run_harness_phase(agent, [
+                {'role': 'system', 'content': 'Search approved concepts.'},
+                {'role': 'user', 'content': '{"task":"exploration_search", "schema":{}}'}],
+                'exploration_search', report, search_callback=search)
+        finally:
+            await agent.pipeline.providers.close()
+
+    assert asyncio.run(exercise()) == {'searched': True}
+    assert searched == [('public scheduling concept', 'en')]
+    assert len(requests) == len(agent.store.calls_for_job(agent.job_id)) == 2
+    audits = [json.loads(line) for line in Path(report['tool_audit_path']).read_text().splitlines()]
+    assert [entry['tool'] for entry in audits] == ['search_web']
+    assert 'mock-private-model-key' not in json.dumps(report)
+
+
+@integration
+def test_real_runtime_lesson_phase_is_tool_free(tmp_path):
+    requests = []
+
+    def wire(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        assert not body.get('tools')
+        return httpx.Response(200, json=completion('{"evidence_sufficient":true}'))
+
+    agent = make_agent(tmp_path, wire)
+    report = {}
+
+    async def exercise():
+        try:
+            return await run_harness_phase(agent, [
+                {'role': 'system', 'content': 'Write the lesson JSON.'},
+                {'role': 'user', 'content': '{"task":"lesson_author", "schema":{}}'}],
+                'lesson_author', report)
+        finally:
+            await agent.pipeline.providers.close()
+
+    assert asyncio.run(exercise()) == {'evidence_sufficient': True}
+    assert report['status'] == 'completed' and report['proposal_only'] is True
+    assert len(requests) == 1
+
+
 def test_child_environment_contains_only_ephemeral_relay_credential(monkeypatch, tmp_path):
     monkeypatch.setenv('DEEPSEEK_API_KEY', 'must-not-inherit')
     monkeypatch.setenv('OPENROUTER_API_KEY', 'must-not-inherit')

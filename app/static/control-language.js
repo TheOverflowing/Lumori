@@ -30,6 +30,9 @@ export function nativeValidationMessage(control) {
 
 function localizeValidation(control) {
   if (!control?.validity || !control.setCustomValidity) return;
+  // Disabled/read-only controls conceal their validationMessage. Keep ownership
+  // until they can be validated again instead of treating our error as external.
+  if (control.willValidate === false) return;
   const owned = nativeMessages.get(control);
   if (owned && control.validationMessage === owned) control.setCustomValidity('');
   nativeMessages.delete(control);
@@ -55,17 +58,25 @@ export function refreshControlLanguage(root = document) {
     input.title = t('选择文件');
   }
   for (const input of root.querySelectorAll('input, select, textarea')) {
-    if (nativeMessages.has(input) || input.dataset.localizedValidity) localizeValidation(input);
+    localizeValidation(input);
   }
 }
 
 export function installControlLanguage(root = document) {
   root.addEventListener('invalid', event => localizeValidation(event.target), true);
+  // Browsers also expose native validation as hover/focus hints before a form
+  // is submitted. Prepare those messages before the browser displays them.
+  root.addEventListener('pointerover', event => localizeValidation(event.target), true);
+  root.addEventListener('focusin', event => localizeValidation(event.target), true);
   const update = event => {
     const input = event.target;
-    if (nativeMessages.has(input)) localizeValidation(input);
+    localizeValidation(input);
     if (input.matches?.('.localized-file-input')) refreshControlLanguage(input.parentElement);
   };
   root.addEventListener('input', update, true);
   root.addEventListener('change', update, true);
+  root.addEventListener('reset', event => {
+    // The reset event fires before default values have been restored.
+    queueMicrotask(() => { if (!event.defaultPrevented) refreshControlLanguage(event.target); });
+  }, true);
 }

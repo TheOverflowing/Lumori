@@ -142,6 +142,42 @@ export function generationProgressView(job) {
   };
 }
 
+// This measures completed workflow steps, not elapsed or remaining time. Each
+// declared stage has equal weight; accepted questions subdivide the writing
+// stage, including when parallel workers finish out of order. Only a persisted
+// successful job fills the bar completely. Missing telemetry stays indeterminate.
+export function generationProgressMeter(view) {
+  const total = view.stages.length;
+  const done = view.stages.filter(stage => stage.status === 'completed').length;
+  let units = done;
+  if (view.counter && view.stages.some(stage => stage.kind === 'writing' && stage.status !== 'completed')) {
+    units += view.counter.done / view.counter.total;
+  }
+  return {
+    value:view.status === 'succeeded' ? 100 : total ? Math.min(99, Math.floor(units / total * 100)) : null,
+    summary:view.status === 'succeeded' ? {key:'任务已完成'}
+      : total ? {key:'已完成 {done} / {total} 个步骤', values:{done,total}}
+      : {key:view.title},
+  };
+}
+function meterMarkup(view) {
+  const meter = generationProgressMeter(view);
+  return `<div class="generation-meter" data-progress-meter data-determinate="${meter.value !== null}"><div class="generation-meter-caption"><span>${m('生成进度')}</span><span id="generation-meter-summary" data-progress-meter-summary>${m(meter.summary)}</span></div><div class="generation-meter-track" data-progress-meter-track role="progressbar" ${a('生成进度','aria-label')} aria-describedby="generation-meter-summary" aria-valuemin="0" aria-valuemax="100" ${meter.value === null ? '' : `aria-valuenow="${meter.value}"`}><span class="generation-meter-fill" data-progress-meter-fill style="transform:scaleX(${(meter.value || 0) / 100})"></span><span class="generation-meter-pending" aria-hidden="true"></span></div></div>`;
+}
+function updateMeter(root, previous, view) {
+  const before = generationProgressMeter(previous), meter = generationProgressMeter(view);
+  if (JSON.stringify(before) === JSON.stringify(meter)) return;
+  const container = root.querySelector('[data-progress-meter]');
+  container.dataset.determinate = String(meter.value !== null);
+  const track = root.querySelector('[data-progress-meter-track]');
+  if (meter.value === null) track.removeAttribute('aria-valuenow');
+  else track.setAttribute('aria-valuenow', String(meter.value));
+  root.querySelector('[data-progress-meter-fill]').style.transform = `scaleX(${(meter.value || 0) / 100})`;
+  if (JSON.stringify(before.summary) !== JSON.stringify(meter.summary)) {
+    setText(root.querySelector('[data-progress-meter-summary]'), meter.summary);
+  }
+}
+
 function stageMarkup(stages) {
   return stages.map(stage => `<li class="generation-stage" data-stage="${escape(stage.id)}" data-state="${stage.status}" ${stage.status === 'active' ? 'aria-current="step"' : ''}><span class="generation-stage-icon">${stageIcon(stage.kind)}</span><span class="generation-stage-label">${m(stage.label)}</span><span class="generation-stage-meta"><span class="generation-stage-state">${m(stageStatuses[stage.status])}</span><span class="generation-stage-time">${durationMarkup(stage.elapsed, stage.timingComplete)}</span></span></li>`).join('');
 }
@@ -162,7 +198,7 @@ function actionMarkup(view) {
 
 function renderSimpleProgress(job) {
   const view = generationProgressView(job);
-  return `<section class="generation-progress" data-generation-progress data-state="${escape(view.status)}" aria-labelledby="generation-progress-title"><a class="generation-back" href="#jobs"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m12 5-5 5 5 5"/></svg>${m('任务记录')}</a><div class="generation-progress-body"><div class="generation-orbit" aria-hidden="true"><span class="generation-orbit-track"></span><span class="generation-orbit-arc"></span><span class="generation-orbit-glyph" data-progress-icon>${iconLayers(view)}</span></div><div class="generation-progress-status" role="status" aria-live="polite" aria-atomic="true"><h1 id="generation-progress-title">${m(view.title)}</h1><p class="generation-counter" data-progress-count ${view.counter ? '' : 'hidden'}>${view.counter ? m('已检查 {done} / {total} 题', view.counter) : ''}</p></div><p class="generation-progress-message" data-progress-message ${view.message ? '' : 'hidden'}>${view.message ? m(view.message) : ''}</p><ol class="generation-stages" data-progress-stages ${a('生成步骤', 'aria-label')} ${view.stages.length ? '' : 'hidden'}>${stageMarkup(view.stages)}</ol><details class="generation-failure-detail" data-progress-reason ${view.reason ? '' : 'hidden'}>${reasonMarkup(view)}</details><div class="generation-progress-actions" data-progress-actions>${actionMarkup(view)}</div><div class="generation-connection" data-progress-connection hidden><p role="status">${m('连接暂时中断，正在重试')}</p><button class="link" data-action="retry">${m('刷新状态')}</button></div></div></section>`;
+  return `<section class="generation-progress" data-generation-progress data-state="${escape(view.status)}" aria-labelledby="generation-progress-title"><a class="generation-back" href="#jobs"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m12 5-5 5 5 5"/></svg>${m('任务记录')}</a><div class="generation-progress-body"><div class="generation-orbit" aria-hidden="true"><span class="generation-orbit-track"></span><span class="generation-orbit-arc"></span><span class="generation-orbit-glyph" data-progress-icon>${iconLayers(view)}</span></div><div class="generation-progress-status" role="status" aria-live="polite" aria-atomic="true"><h1 id="generation-progress-title">${m(view.title)}</h1><p class="generation-counter" data-progress-count ${view.counter ? '' : 'hidden'}>${view.counter ? m('已检查 {done} / {total} 题', view.counter) : ''}</p></div>${meterMarkup(view)}<p class="generation-progress-message" data-progress-message ${view.message ? '' : 'hidden'}>${view.message ? m(view.message) : ''}</p><ol class="generation-stages" data-progress-stages ${a('生成步骤', 'aria-label')} ${view.stages.length ? '' : 'hidden'}>${stageMarkup(view.stages)}</ol><details class="generation-failure-detail" data-progress-reason ${view.reason ? '' : 'hidden'}>${reasonMarkup(view)}</details><div class="generation-progress-actions" data-progress-actions>${actionMarkup(view)}</div><div class="generation-connection" data-progress-connection hidden><p role="status">${m('连接暂时中断，正在重试')}</p><button class="link" data-action="retry">${m('刷新状态')}</button></div></div></section>`;
 }
 
 // Keep the orbit and interactive controls mounted between polls. A new status
@@ -175,6 +211,7 @@ function mountSimpleProgress(root, initial) {
     update(job) {
       const view = generationProgressView(job);
       root.dataset.state = view.status;
+      updateMeter(root, previous, view);
       if (previous.title !== view.title) motion.text(find('#generation-progress-title'), view.title);
       if (previous.icon !== view.icon) selectLayer(find('[data-progress-icon]'),view.icon,glyph(view.icon));
       if (JSON.stringify(previous.counter) !== JSON.stringify(view.counter)) {
@@ -358,7 +395,7 @@ function detailedStageMarkup(stages, selected) {
 }
 function renderDetailedProgress(job) {
   const view = generationProgressView(job), selected = currentStage(view);
-  return `<section class="generation-progress generation-progress-detailed" data-generation-progress data-mode="detailed" data-state="${escape(view.status)}" aria-labelledby="generation-progress-title"><a class="generation-back" href="#jobs"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m12 5-5 5 5 5"/></svg>${m('任务记录')}</a><header class="generation-workbench-heading"><div class="generation-workbench-status" role="status" aria-live="polite" aria-atomic="true"><h1 id="generation-progress-title">${m(view.title)}</h1><p class="generation-counter" data-progress-count ${view.counter ? '' : 'hidden'}>${view.counter ? m('已检查 {done} / {total} 题',view.counter) : ''}</p></div><div class="generation-total-time"><span>${m('总处理耗时')}</span><strong data-progress-total-time>${durationMarkup(view.elapsed,view.timingComplete)}</strong></div></header><div class="generation-workbench"><aside class="generation-stage-nav" ${a('生成步骤','aria-label')}><ol data-progress-stages>${detailedStageMarkup(view.stages,selected)}</ol><button class="generation-follow" data-progress-follow disabled>${m('正在跟随当前步骤')}</button></aside><section class="generation-stage-workspace" aria-labelledby="generation-stage-title"><div class="generation-workspace-top"><h2 id="generation-stage-title">${m(selected?.label || '任务概况')}</h2><span class="generation-workspace-time" data-progress-selected-time>${durationMarkup(selected?.elapsed,selected?.timingComplete)}</span></div><div class="generation-visual" data-progress-visual data-motion="${selected?.status === 'active' && view.status === 'running' ? 'active' : 'static'}">${sceneLayers(view,selected)}</div><p class="generation-stage-headline" data-progress-stage-headline>${m(selectedHeadline(view,selected))}</p><div class="generation-events-header"><h3>${m('处理记录')}</h3><span data-progress-truncated ${view.truncated ? '' : 'hidden'}>${m('仅显示最近记录')}</span></div><ol class="generation-events" data-progress-events tabindex="0" ${a('处理记录','aria-label')}>${eventsMarkup(view,selected)}</ol></section></div><div class="generation-workbench-footer"><div><p class="generation-progress-message" data-progress-message ${view.message ? '' : 'hidden'}>${view.message ? m(view.message) : ''}</p><details class="generation-failure-detail" data-progress-reason ${view.reason ? '' : 'hidden'}>${reasonMarkup(view)}</details></div><div class="generation-progress-actions" data-progress-actions>${actionMarkup(view)}</div></div><div class="generation-connection" data-progress-connection hidden><p role="status">${m('连接暂时中断，正在重试')}</p><button class="link" data-action="retry">${m('刷新状态')}</button></div></section>`;
+  return `<section class="generation-progress generation-progress-detailed" data-generation-progress data-mode="detailed" data-state="${escape(view.status)}" aria-labelledby="generation-progress-title"><a class="generation-back" href="#jobs"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m12 5-5 5 5 5"/></svg>${m('任务记录')}</a><header class="generation-workbench-heading"><div class="generation-workbench-status" role="status" aria-live="polite" aria-atomic="true"><h1 id="generation-progress-title">${m(view.title)}</h1><p class="generation-counter" data-progress-count ${view.counter ? '' : 'hidden'}>${view.counter ? m('已检查 {done} / {total} 题',view.counter) : ''}</p></div><div class="generation-total-time"><span>${m('总处理耗时')}</span><strong data-progress-total-time>${durationMarkup(view.elapsed,view.timingComplete)}</strong></div></header>${meterMarkup(view)}<div class="generation-workbench"><aside class="generation-stage-nav" ${a('生成步骤','aria-label')}><ol data-progress-stages>${detailedStageMarkup(view.stages,selected)}</ol><button class="generation-follow" data-progress-follow disabled>${m('正在跟随当前步骤')}</button></aside><section class="generation-stage-workspace" aria-labelledby="generation-stage-title"><div class="generation-workspace-top"><h2 id="generation-stage-title">${m(selected?.label || '任务概况')}</h2><span class="generation-workspace-time" data-progress-selected-time>${durationMarkup(selected?.elapsed,selected?.timingComplete)}</span></div><div class="generation-visual" data-progress-visual data-motion="${selected?.status === 'active' && view.status === 'running' ? 'active' : 'static'}">${sceneLayers(view,selected)}</div><p class="generation-stage-headline" data-progress-stage-headline>${m(selectedHeadline(view,selected))}</p><div class="generation-events-header"><h3>${m('处理记录')}</h3><span data-progress-truncated ${view.truncated ? '' : 'hidden'}>${m('仅显示最近记录')}</span></div><ol class="generation-events" data-progress-events tabindex="0" ${a('处理记录','aria-label')}>${eventsMarkup(view,selected)}</ol></section></div><div class="generation-workbench-footer"><div><p class="generation-progress-message" data-progress-message ${view.message ? '' : 'hidden'}>${view.message ? m(view.message) : ''}</p><details class="generation-failure-detail" data-progress-reason ${view.reason ? '' : 'hidden'}>${reasonMarkup(view)}</details></div><div class="generation-progress-actions" data-progress-actions>${actionMarkup(view)}</div></div><div class="generation-connection" data-progress-connection hidden><p role="status">${m('连接暂时中断，正在重试')}</p><button class="link" data-action="retry">${m('刷新状态')}</button></div></section>`;
 }
 
 export function renderGenerationProgress(job, {mode = 'simple'} = {}) {
@@ -451,6 +488,7 @@ function mountDetailedProgress(root, initial) {
       view = generationProgressView(job);
       selected = progressSelection(view,selected?.id,following);
       root.dataset.state = view.status;
+      updateMeter(root, previousView, view);
       if (previousView.title !== view.title) motion.text(find('#generation-progress-title'),view.title);
       if (!equal(previousView.counter,view.counter)) {
         const counter = find('[data-progress-count]'); counter.hidden = !view.counter;

@@ -335,7 +335,7 @@ def _sse(data, model):
 
 
 def create_relay_app(providers, job_id, token, *, max_requests=6, max_output_tokens=4096,
-                     before_call=None, allowed_tool_names=None):
+                     before_call=None, allowed_tool_names=None, search_callback=None):
     """Return a relay app; before_call is a zero-argument sync/async scope guard.
 
     app.state.audit is available only to the parent process, never via a route.
@@ -360,6 +360,36 @@ def create_relay_app(providers, job_id, token, *, max_requests=6, max_output_tok
         keys = [getattr(providers.settings, capability).api_key for capability in
                 ('text', 'embedding', 'rerank', 'speech', 'image', 'vision')]
         return [token, *keys]
+
+    if search_callback is not None:
+        @app.post('/v1/tools/search')
+        async def search_tool(request: Request):
+            authorization = request.headers.getlist('authorization')
+            credential = authorization[0] if len(authorization) == 1 else ''
+            scheme, separator, supplied = credential.partition(' ')
+            if not (separator and scheme.casefold() == 'bearer' and
+                    secrets.compare_digest(supplied.encode(), token.encode())):
+                return _error(401, 'unauthorized')
+            try:
+                raw = await request.body()
+                if len(raw) > 1024:
+                    raise ValueError()
+                value = json.loads(raw)
+                if not isinstance(value, dict) or set(value) != {'query', 'language'}:
+                    raise ValueError()
+                if not isinstance(value['query'], str) or not isinstance(value['language'], str):
+                    raise ValueError()
+                result = search_callback(value['query'], value['language'])
+                if inspect.isawaitable(result):
+                    result = await result
+                return JSONResponse(_clean({'candidates': result}, secret_values()),
+                                    headers={'Cache-Control': 'no-store'})
+            except (ValueError, TypeError, UnicodeError):
+                return _error(400, 'invalid_request')
+            except JobCancelled:
+                return _error(409, 'task_cancelled')
+            except Exception:
+                return _error(502, 'provider_failed')
 
     @app.post('/v1/chat/completions')
     async def completion(request: Request):
@@ -442,7 +472,7 @@ def create_relay_app(providers, job_id, token, *, max_requests=6, max_output_tok
 
 @asynccontextmanager
 async def serve_relay(providers, job_id, token, *, max_requests=6, max_output_tokens=4096,
-                      before_call=None, allowed_tool_names=None):
+                      before_call=None, allowed_tool_names=None, search_callback=None):
     """Yield (OpenAI base_url including /v1, app); close server/socket on exit."""
     import uvicorn
 
@@ -454,7 +484,8 @@ async def serve_relay(providers, job_id, token, *, max_requests=6, max_output_to
 
     app = create_relay_app(providers, job_id, token, max_requests=max_requests,
                            max_output_tokens=max_output_tokens, before_call=before_call,
-                           allowed_tool_names=allowed_tool_names)
+                           allowed_tool_names=allowed_tool_names,
+                           search_callback=search_callback)
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     task = None
     server = None

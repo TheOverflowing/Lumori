@@ -290,3 +290,53 @@ test('editing invalidates both strict and adjusted assessment banners until the 
     {status:'needs_review',version:1,items:[{slot_id:'q1',assessed_difficulty:'easy',rationale:'Prior version only.'}]});
   assert.doesNotMatch(invalidated,/模型判断|Prior version only\./);
 });
+
+test('shadow disagreement appears for current content but stale evidence does not grade the edited question', () => {
+  const content={version:1,asset:{questions:[{slot_id:'q1',stem:'Compare windows.',difficulty:'hard'}]},
+    difficulty_assessment:{status:'model_adjusted'},
+    difficulty_shadow:{matches_current_content:true,questions:[{slot_id:'q1',candidates:['easy','medium'],
+      manual_review_recommended:true,review_flags:['published_grade_outside_candidates','difficulty_boundary']}]}};
+  const current=renderDifficultyAssessment(content);
+  assert.match(current,/旁路评审建议人工复核/);
+  assert.match(current,/当前标注的难度未进入旁路评审候选/);
+  assert.match(current,/旁路意见不会自动改题或更改原有判定/);
+  assert.doesNotMatch(current,/&lt;span/);
+  assert.match(current,/简单 \/ 中等/);
+  try {
+    document.documentElement.lang='en';
+    const english=renderDifficultyAssessment(content);
+    assert.match(english,/the displayed difficulty is outside the shadow review candidates/);
+    assert.match(english,/Easy \/ Medium/);
+  } finally { document.documentElement.lang='zh-CN'; }
+  const stale=renderDifficultyAssessment({...content,version:2,difficulty_shadow:{...content.difficulty_shadow,matches_current_content:false}});
+  assert.match(stale,/旁路评审对应旧版本/);
+  assert.doesNotMatch(stale,/当前标注的难度未进入旁路评审候选/);
+  assert.doesNotMatch(renderDifficultyAssessment({...content,difficulty_shadow:null}),/旁路评审建议人工复核/);
+});
+
+test('new reviewer shows content failure before difficulty candidates and discloses incomplete coverage', () => {
+  const content={version:1,asset:{questions:[{slot_id:'q1',stem:'One'},{slot_id:'q2',stem:'Two'}]},
+    difficulty_shadow:{matches_current_content:true,
+      coverage:{total_questions:2,sampled_questions:1,assessed_questions:0},
+      questions:[{slot_id:'q1',candidates:['easy'],decision:{status:'content_issue'},
+        manual_review_recommended:true,review_flags:['published_grade_outside_candidates']}]}};
+  const html=renderDifficultyAssessment(content);
+  assert.match(html,/请先检查内容/);
+  assert.match(html,/0 \/ 2/);
+  assert.match(html,/未判级不表示通过/);
+  assert.doesNotMatch(html,/当前标注的难度未进入旁路评审候选/);
+  const stale=renderDifficultyAssessment({...content,difficulty_shadow:{...content.difficulty_shadow,matches_current_content:false}});
+  assert.doesNotMatch(stale,/请先检查内容|0 \/ 2/);
+});
+
+test('new reviewer distinguishes unavailable evidence from a completed assessment', () => {
+  const content={version:1,asset:{questions:[{slot_id:'q1',stem:'One'}]},
+    difficulty_shadow:{matches_current_content:true,
+      coverage:{total_questions:1,sampled_questions:1,assessed_questions:0},
+      questions:[{slot_id:'q1',decision:{status:'unavailable'},manual_review_recommended:true}]}};
+  assert.match(renderDifficultyAssessment(content),/评审未完整完成/);
+  try {
+    document.documentElement.lang='en';
+    assert.match(renderDifficultyAssessment(content),/Unrated questions have not passed review/);
+  } finally {document.documentElement.lang='zh-CN';}
+});

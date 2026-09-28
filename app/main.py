@@ -139,6 +139,19 @@ def create_app(settings=None,providers_factory=ApiProviders):
             WHERE c.id=? AND o.user_id=?''',(cid,account_id(request)))
         if not row:raise HTTPException(404,'材料不存在')
         return row
+    def difficulty_shadow_for(row, *, full=False):
+        from .difficulty_shadow import summary, digest
+        saved=store.one('SELECT evidence FROM job_evidence WHERE job_id=?',(row['job_id'],))
+        try:
+            evidence=json.loads(saved['evidence']) if saved else {}
+            result=evidence.get('difficulty_shadow') if full else summary(evidence)
+            if not isinstance(result,dict):return None
+            asset=json.loads(row['asset']) if isinstance(row['asset'],str) else row['asset']
+            return dict(result, observed_content_version=1,
+                matches_current_content=row['version']==1 and
+                    evidence['difficulty_shadow'].get('asset_sha256')==digest(asset))
+        except (ValueError,TypeError,KeyError,AttributeError):
+            return None
     def difficulty_assessment_for(row):
         config=json.loads(row['config']) if isinstance(row['config'],str) else row['config']
         asset=json.loads(row['asset']) if isinstance(row['asset'],str) else row['asset']
@@ -522,6 +535,8 @@ def create_app(settings=None,providers_factory=ApiProviders):
         try:
             saved_evidence=json.loads(evidence['evidence']) if evidence else {}
             agent_progress=progress(saved_evidence) if evidence else None
+            from .difficulty_shadow import summary as shadow_summary
+            row['difficulty_shadow'] = shadow_summary(saved_evidence)
             row['partial_available']=row['kind']=='generate' and row['status']!='succeeded' and any(
                 slot.get('status')=='passed' and isinstance(slot.get('accepted_asset'),dict)
                 for slot in saved_evidence.get('agent',{}).get('slots',[]))
@@ -607,6 +622,7 @@ def create_app(settings=None,providers_factory=ApiProviders):
         row['media']=store.all('SELECT id,version,kind,mime,status,metadata FROM media WHERE content_id=? AND version=?',(cid,row['version']))
         for item in row['media']:item['metadata']=json.loads(item['metadata'])
         row['difficulty_assessment']=difficulty_assessment_for(row)
+        row['difficulty_shadow']=difficulty_shadow_for(row)
         row['evaluation']=current_evaluation(store,cid,row['version'])
         return row
     @app.post('/api/contents/{cid}/review')
@@ -767,6 +783,7 @@ def create_app(settings=None,providers_factory=ApiProviders):
             'content_id':cid,'version':row['version'],'status':row['status'],
             'asset':json.loads(row['asset']),'sources':sources,'configuration':config,
             'difficulty_assessment':difficulty_assessment_for(row),
+            'difficulty_shadow':difficulty_shadow_for(row,full=True),
             'generation_calls':calls,
             'exploration':json.loads(exploration['state']) if exploration else None,
             'revisions':[dict(version=r['version'],asset=json.loads(r['asset']),created_at=r['created_at']) for r in store.all('SELECT * FROM revisions WHERE content_id=? ORDER BY version',(cid,))],

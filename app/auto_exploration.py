@@ -296,7 +296,8 @@ def _scope(pipeline, request, job_id):
 def _fingerprint(pipeline, request):
     return hashlib.sha256(dumps({'request': request.model_dump(), 'configuration': configuration(pipeline.settings),
         'retrieval': pipeline.retrieval_configuration(request), 'embedding': pipeline.embedding_signature(),
-        'chunking': pipeline.chunking_configuration(), 'text': pipeline.settings.text.signature}).encode()).hexdigest()
+        'chunking': pipeline.chunking_configuration(), 'text': pipeline.settings.text.signature,
+        'agent_runtime': pipeline.settings.agent_runtime}).encode()).hexdigest()
 
 
 def validate_frozen_sources(pipeline, request, selected):
@@ -371,9 +372,75 @@ class _Run:
     async def model(self, task, system, payload):
         if self.state['model_calls'] >= self.options['max_model_calls']: raise _Stop('model_budget')
         self.state['model_calls'] += 1; self.save()
-        return await self.operation(task, lambda: self.pipeline.providers.generate([
-            {'role': 'system', 'content': system},
-            {'role': 'user', 'content': dumps({'task': task, **payload})}], self.job_id))
+        messages = [{'role': 'system', 'content': system},
+                    {'role': 'user', 'content': dumps({'task': task, **payload})}]
+        if self.pipeline.settings.agent_runtime != 'deepseek_harness':
+            return await self.operation(task, lambda: self.pipeline.providers.generate(messages, self.job_id))
+        from .harness_bridge import run_phase
+        report = {}
+        self.state.setdefault('harness_phases', []).append(report); self.save()
+        try:
+            return await self.operation(task, lambda: run_phase(
+                self.pipeline, self.request, self.job_id, messages, task, [], report,
+                max_requests=min(2, self.pipeline.settings.harness_max_requests,
+                                 self.options['max_model_calls'] - self.state['model_calls'] + 1)))
+        finally:
+            self.state['model_calls'] += max(1, len(report.get('model_calls', []))) - 1
+            self.save()
+
+    async def search_with_harness(self, queries):
+        """Let Harness choose among approved gap queries and call scoped search_web."""
+        # Search needs a tool-call response and a final response. Preserve one
+        # selection and one frozen-coverage check after that loop.
+        if self.state['model_calls'] + 4 > self.options['max_model_calls']:
+            raise _Stop('model_budget')
+        from .harness_bridge import run_phase
+        approved_text = {language: ' '.join(q['query'] for q in queries
+            if q['language'] == language).casefold() for language in ('en', 'zh')}
+        batches = []
+        search_unavailable = False
+
+        async def search(query, language):
+            nonlocal search_unavailable
+            # Allow the agent to combine approved public terms, while preventing
+            # fresh private text or credentials from reaching the search service.
+            terms = re.findall(r'[a-z0-9]+|[\u3400-\u9fff]+', query.casefold()) if isinstance(query, str) else []
+            if (language not in approved_text or _query(query) != query or not terms
+                    or any(term not in approved_text[language] for term in terms)):
+                raise ValueError('Search query is outside the approved public concept vocabulary.')
+            try:
+                found = await self.search({'query': query, 'language': language})
+            except exploration_sources.SearchUnavailable:
+                search_unavailable = True
+                return []
+            batches.append(found)
+            return found
+
+        self.state['model_calls'] += 1
+        report = {}
+        self.state.setdefault('harness_phases', []).append(report); self.save()
+        system = ('Search the web for the listed missing course concepts. Use search_web for each useful '
+                  'query, in either language, within the provided search budget. Search results are only '
+                  'candidate URLs; the host will fetch, check licenses and validate evidence. Do not '
+                  'assume a result is usable from its title or snippet. Return only JSON.')
+        messages = [{'role': 'system', 'content': system}, {'role': 'user', 'content': dumps({
+            'task': 'exploration_search', 'queries': queries,
+            'remaining_search_calls': self.options['max_search_calls'] - self.state['search_calls'],
+            'schema': {'type': 'object', 'properties': {'searched': {'const': True}},
+                       'required': ['searched'], 'additionalProperties': False}})}]
+        try:
+            value = await self.operation('searching_sources', lambda: run_phase(
+                self.pipeline, self.request, self.job_id, messages, 'exploration_search', [], report,
+                search_callback=search,
+                max_requests=min(self.pipeline.settings.harness_max_requests,
+                                 self.options['max_model_calls'] - self.state['model_calls'] - 1)))
+            if value != {'searched': True} or not batches:
+                raise _Stop('search_unavailable' if search_unavailable else 'no_search_results')
+            return [batch[index] for index in range(max(map(len, batches), default=0))
+                    for batch in batches if index < len(batch)]
+        finally:
+            self.state['model_calls'] += max(1, len(report.get('model_calls', []))) - 1
+            self.save()
 
     async def assess(self, selected):
         job_progress.update(self.store, self.job_id, 'exploration', activity='checking_evidence')
@@ -461,6 +528,8 @@ class _Run:
         if selected: validate_frozen_sources(self.pipeline, self.request, selected)
         self.state.update(status='complete', reason=reason, in_flight=None, elapsed_ms=round((time.monotonic() - self.started) * 1000))
         public = {key: self.state[key] for key in ('version', 'reason', 'rounds', 'model_calls', 'search_calls', 'search_audit', 'accepted', 'rejected', 'assessments', 'elapsed_ms')}
+        if 'harness_phases' in self.state:
+            public['harness_phases'] = self.state['harness_phases']
         public['candidate_retrievals'] = self.state.get('candidate_retrievals', [])
         public['configuration'] = self.options
         result = dict(trace, exploration=public)
@@ -641,26 +710,31 @@ async def retrieve(pipeline, request, job_id, local_retrieve):
         if assessment['status'] == 'needs_user_input': return run.finish([], trace, 'needs_user_input')
         for round_number in range(1, run.options['max_rounds'] + 1):
             state['rounds'] = round_number; run.save(); run.budget()
-            if state['model_calls'] + 2 > run.options['max_model_calls']: raise _Stop('model_budget')
+            needed = 4 if pipeline.settings.agent_runtime == 'deepseek_harness' else 2
+            if state['model_calls'] + needed > run.options['max_model_calls']:
+                raise _Stop('model_budget')
             gaps = [item for item in assessment['requirements'] if not item['covered']]
             queries = list({(q['query'], q['language']): q for g in gaps for q in g['queries']}.values())[:6]
             job_progress.update(pipeline.store, job_id, 'exploration', activity='searching_sources')
             job_progress.event(pipeline.store, job_id, 'exploration', 'exploration_search', round=round_number, queries=len(queries))
             candidates = []; batches = []
-            for query in queries:
-                try:
-                    if state['search_calls'] >= run.options['max_search_calls']:
-                        if candidates: break
-                        raise _Stop('search_budget')
-                    found = await run.search(query)
-                except exploration_sources.SearchUnavailable:
-                    if not candidates: raise _Stop('search_unavailable')
-                    break
-                batches.append(found)
-                # Interleave search routes so the first query cannot consume all
-                # source slots before a different missing concept is considered.
-                candidates = [batch[index] for index in range(max(map(len, batches), default=0))
-                              for batch in batches if index < len(batch)]
+            if pipeline.settings.agent_runtime == 'deepseek_harness':
+                candidates = await run.search_with_harness(queries)
+            else:
+                for query in queries:
+                    try:
+                        if state['search_calls'] >= run.options['max_search_calls']:
+                            if candidates: break
+                            raise _Stop('search_budget')
+                        found = await run.search(query)
+                    except exploration_sources.SearchUnavailable:
+                        if not candidates: raise _Stop('search_unavailable')
+                        break
+                    batches.append(found)
+                    # Interleave search routes so the first query cannot consume all
+                    # source slots before a different missing concept is considered.
+                    candidates = [batch[index] for index in range(max(map(len, batches), default=0))
+                                  for batch in batches if index < len(batch)]
             accepted_before = len(state['accepted'])
             newly_supported = set()
             for candidate in candidates:

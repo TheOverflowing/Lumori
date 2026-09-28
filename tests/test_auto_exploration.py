@@ -131,6 +131,33 @@ def test_no_documents_discovers_indexes_and_freezes_sources(rig):
     assert seen == before and len(pipeline.providers.calls) == model_calls
 
 
+def test_harness_exploration_searches_through_scoped_agent_tool(rig, monkeypatch):
+    from app import harness_bridge
+    pipeline, request, job_id, seen, _ = rig
+    pipeline.settings.agent_runtime = 'deepseek_harness'
+    phases = []
+
+    async def harness_phase(pipeline, request, job_id, messages, phase, sources, report,
+                            *, search_callback=None, max_requests=None):
+        phases.append(phase)
+        report['model_calls'] = [{}]
+        if phase == 'exploration_search':
+            assert search_callback is not None and not sources
+            query = json.loads(messages[1]['content'])['queries'][0]
+            await search_callback(query['query'], query['language'])
+            report['model_calls'] = [{}, {}]
+            return {'searched': True}
+        return await pipeline.providers.generate(messages, job_id)
+
+    monkeypatch.setattr(harness_bridge, 'run_phase', harness_phase)
+    selected, trace = run(rig)
+    assert selected and trace['exploration']['reason'] == 'sources_sufficient'
+    assert phases == ['exploration_coverage', 'exploration_search',
+                      'exploration_selection', 'exploration_coverage']
+    assert seen['search'] == [('MLFQ priority boost starvation', 'en')]
+    assert len(trace['exploration']['harness_phases']) == 4
+
+
 def test_newly_indexed_source_gets_frozen_gap_recheck_before_first_job_stops(rig, monkeypatch, tmp_path):
     from tokenizers import Tokenizer
     from tokenizers.models import WordLevel

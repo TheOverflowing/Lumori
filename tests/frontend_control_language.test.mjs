@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { english } from '../app/static/translations.js';
 import { renderFilePicker, nativeValidationMessage, installControlLanguage, refreshControlLanguage, setLocalizedValidity } from '../app/static/control-language.js';
-import { t } from '../app/static/i18n.js';
+import { t, localize } from '../app/static/i18n.js';
 
 globalThis.document = {documentElement:{lang:'en'}};
 function control(flags = {}, extra = {}) {
@@ -27,6 +27,60 @@ test('native validation uses English and clears after valid editing', () => {
   input.validity.valueMissing=false;root.listeners.input({target:input});
   assert.equal(input.validationMessage,'');
   assert.equal(input.validity.customError,false);
+});
+test('first hover and keyboard focus localize native hints before any submission', () => {
+  document.documentElement.lang='en';
+  const missing=control({valueMissing:true}),number=control({rangeOverflow:true},{type:'number',max:'50'});
+  const root=rootFor([missing,number]);installControlLanguage(root);
+  root.listeners.pointerover({target:missing});
+  root.listeners.focusin({target:number});
+  assert.equal(missing.validationMessage,'Please fill out this field.');
+  assert.equal(number.validationMessage,'Please enter a value less than or equal to 50.');
+  assert.doesNotThrow(()=>root.listeners.pointerover({target:{tagName:'SPAN'}}));
+  number.validity.rangeOverflow=false;root.listeners.input({target:number});
+  assert.equal(number.validationMessage,'');
+  number.validity.rangeUnderflow=true;number.min='1';root.listeners.input({target:number});
+  assert.equal(number.validationMessage,'Please enter a value greater than or equal to 1.');
+});
+test('language refresh prepares untouched fields without replacing their values', () => {
+  const input=control({typeMismatch:true},{type:'email',value:'my unfinished email'}),root=rootFor([input]);
+  document.documentElement.lang='zh-CN';refreshControlLanguage(root);
+  assert.equal(input.validationMessage,'请输入有效的邮箱地址。');
+  document.documentElement.lang='en';refreshControlLanguage(root);
+  assert.equal(input.validationMessage,'Enter a valid email address.');
+  assert.equal(input.value,'my unfinished email');
+});
+test('temporarily disabled controls keep validation ownership across language changes', () => {
+  document.documentElement.lang='zh-CN';
+  const input=control({valueMissing:true}),root=rootFor([input]);
+  refreshControlLanguage(root);
+  const hiddenMessage=input.validationMessage;
+  input.willValidate=false;input.validationMessage='';
+  document.documentElement.lang='en';refreshControlLanguage(root);
+  assert.equal(input.validationMessage,'');
+  input.willValidate=true;input.validationMessage=hiddenMessage;
+  installControlLanguage(root);root.listeners.pointerover({target:input});
+  assert.equal(input.validationMessage,'Please fill out this field.');
+});
+test('form reset clears a localized error after restoring a valid default', async () => {
+  document.documentElement.lang='en';
+  const input=control({rangeOverflow:true},{max:'50'}),root=rootFor([input]);
+  installControlLanguage(root);root.listeners.pointerover({target:input});
+  root.listeners.reset({target:root,defaultPrevented:false});
+  input.validity.rangeOverflow=false;
+  await Promise.resolve();
+  assert.equal(input.validationMessage,'');
+  assert.equal(input.validity.customError,false);
+});
+test('existing interface hover titles switch language in place', () => {
+  const hints=['设置','新建课程','用于生成','关闭'];
+  const elements=hints.map(key=>({key,title:key,
+    getAttribute:()=>key,setAttribute(name,value){this[name]=value;}}));
+  const root={querySelectorAll:selector=>selector==='[data-i18n-title]'?elements:[]};
+  for(const lang of ['en','zh-CN','en']) {
+    document.documentElement.lang=lang;localize(root);
+    for(const element of elements) assert.equal(element.title,t(element.key));
+  }
 });
 test('business validation switches language without losing its rule or overriding unrelated errors', () => {
   const input=control(),root=rootFor([input]);

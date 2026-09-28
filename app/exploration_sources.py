@@ -27,7 +27,7 @@ from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 import httpx
 
 
-CATALOG_VERSION = 'public-course-sources-20260923-v4'
+CATALOG_VERSION = 'public-course-sources-20260924-v5'
 BRAVE_ENDPOINT = 'https://api.search.brave.com/res/v1/web/search'
 BRAVE_DOCUMENTATION = 'https://api-dashboard.search.brave.com/app/documentation/web-search'
 WIKIMEDIA_ENDPOINTS = {'en': 'https://en.wikipedia.org/w/api.php',
@@ -143,6 +143,18 @@ CATALOG = tuple(
            license_url='https://docs.python.org/3/license.html'),
     _entry('https://docs.python.org/zh-cn/3/tutorial/datastructures.html', 'Python 教程：数据结构',
            ('python', 'python list', 'python dictionary', 'python列表', 'python字典', '列表推导式'), language='zh',
+           attribution='Python Software Foundation and translators', license='Python documentation license (PSF)',
+           license_url='https://docs.python.org/3/license.html'),
+    _entry('https://docs.python.org/3/tutorial/introduction.html', 'Python Tutorial: Lists and indexing',
+           ('python list', 'python lists', 'list definition', 'list syntax', 'list literal',
+            'list indexing', 'list mutable',
+            'python 列表', '列表 定义', '列表 可变', '列表 索引', '列表 创建'),
+           attribution='Python Software Foundation', license='Python documentation license (PSF)',
+           license_url='https://docs.python.org/3/license.html'),
+    _entry('https://docs.python.org/zh-cn/3/tutorial/introduction.html', 'Python 教程：列表与索引',
+           ('python list', 'python lists', 'list definition', 'list syntax', 'list literal',
+            'list indexing', 'list mutable',
+            'python 列表', '列表 定义', '列表 可变', '列表 索引', '列表 创建'), language='zh',
            attribution='Python Software Foundation and translators', license='Python documentation license (PSF)',
            license_url='https://docs.python.org/3/license.html'),
     # This exact LibreTexts page declares CC BY 4.0 and includes the rule,

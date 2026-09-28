@@ -1,0 +1,13 @@
+.draft-tools { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:16px; min-height:36px; }
+.draft-tools [role="status"] { color:var(--secondary); font-size:.72rem; line-height:1.5; }
+.draft-tools button.link { flex-shrink:0; min-height:36px; padding:6px 0; font-size:.72rem; }
+.draft-tools + .submit-bar { margin-top:12px; }
+.draft-banner { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px 18px; margin-bottom:20px; padding:10px 16px; border:1px solid var(--line); border-radius:14px; color:var(--secondary); font-size:.8rem; }
+.draft-banner[hidden] { display:none; }
+.draft-banner .row-actions { flex-wrap:wrap; gap:16px; }
+.draft-banner button.link { min-height:36px; padding:5px 0; font-size:.8rem; }
+#edit-panel { scroll-margin-top:180px; }
+@media (max-width:700px) {
+  .draft-tools { flex-wrap:wrap; }
+  .draft-tools button.link, .draft-banner button.link { min-height:44px; }
+}

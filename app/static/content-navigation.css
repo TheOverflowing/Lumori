@@ -1,0 +1,80 @@
+/* A compact reading aid, kept below the measured application toolbar. */
+.content-navigation {
+  position: sticky;
+  top: var(--content-toolbar-height, 88px);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  margin-bottom: 18px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: rgb(var(--toolbar-surface));
+}
+.content-navigation-caption {
+  flex: 0 0 auto;
+  color: var(--secondary);
+  padding-inline-start: 5px;
+  font-size: .74rem;
+}
+.content-navigation-links {
+  display: flex;
+  gap: 5px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  padding: 3px;
+}
+.content-navigation .content-navigation-item {
+  flex: 0 0 auto;
+  display: block;
+  min-height: 36px;
+  max-width: 200px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--secondary);
+  font-size: .76rem;
+  font-weight: 450;
+  font-variant-numeric: tabular-nums;
+}
+.content-navigation .content-navigation-item[aria-current="location"] {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+.content-navigation-select { display: none; }
+[data-content-anchor] {
+  scroll-margin-top: calc(var(--content-toolbar-height, 88px) + var(--content-navigation-height, 60px) + 20px);
+}
+[data-content-anchor]:focus-visible { outline: 2px solid var(--blue); outline-offset: 8px; border-radius: 4px; }
+@media (hover:hover) and (pointer:fine) {
+  .content-navigation .content-navigation-item:hover { background: var(--blue-soft); color: var(--blue); }
+}
+@media (max-width:700px) {
+  .content-navigation { gap: 10px; padding: 6px 10px; }
+  .content-navigation-links { display: none; }
+  .content-navigation-select {
+    display: block;
+    flex: 1;
+    min-width: 0;
+    width: 100%;
+    min-height: 44px;
+    margin: 0;
+    border: 0;
+    background-color: transparent;
+    color: var(--text);
+    font-size: .8rem;
+    text-overflow: ellipsis;
+  }
+}
+@media (prefers-reduced-motion:reduce) {
+  .content-navigation .content-navigation-item { transition: none; }
+  .content-navigation .content-navigation-item:active { transform: none; }
+}
+@media print { .content-navigation { display: none; } }

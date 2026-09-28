@@ -1,4 +1,8 @@
 import { renderAsset, renderContentSources } from './content-renderer.js';
+import { renderContentNavigation, mountContentNavigation } from './content-navigation.js';
+import { createDraftStore, createDraftAutosave, draftKey } from './drafts.js';
+import { generationDraftData, editableAssetValues, restoreEditValues, applyEditValues, clearSubmittedEditDraft } from './draft-forms.js';
+import { createViewPositions } from './view-position.js';
 import { mountCitations } from './citations.js';
 import { renderRatingPanel, bindRatingPanel, renderExportDialog, readExportOptions, renderReviewBar } from './content-review.js';
 import { renderQuestionRevisionDialog, bindQuestionRevision, renderQuestionComparison } from './question-revision.js';
@@ -27,6 +31,9 @@ const page = $('#page');
 const modal = $('#modal');
 let pageInputs = null, modalInputs = null;
 let routeLoad = null;
+const draftStore = createDraftStore();
+const viewPositions = createViewPositions({window});
+let renderedView = null, editorSession = null;
 modal.addEventListener('close', () => { modalInputs?.destroy(); modalInputs = null; });
 const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const icon = name => `<img class="icon" src="/static/icons/${name}.svg" alt="">`;
@@ -38,7 +45,7 @@ const button = (label, action, style = '', attrs = '') => `<button class="${styl
 const heading = title => `<div class="page-heading"><h1>${m(title)}</h1></div>`;
 const empty = (title, description, action = '', label = '', symbol = 'book-open') => `<div class="empty-state">${icon(symbol)}<h2>${m(title)}</h2>${description?`<p>${m(description)}</p>`:''}${action?button(label, action):''}</div>`;
 const date = value => `<time data-date="${esc(value)}">${esc(formatDate(value))}</time>`;
-const state = {course:'', cleanup:null, library:{course:'',filter:'all',query:''}, courses:[], revision:0, route:{page:'home'}, drafts:new Map(), content:null, learningId:new URLSearchParams(location.search).get('learn')};
+const state = {course:'', cleanup:null, library:{course:'',filter:'all',query:''}, libraries:new Map(), documents:new Map(), courses:[], revision:0, route:{page:'home'}, drafts:new Map(), content:null, learningId:new URLSearchParams(location.search).get('learn')};
 let workspaceReady = false, workspaceOpened = false, authMode = 'login', sessionCheck = null;
 let pendingRestore = null, restoreEmail = '', restoreAttemptUser = null;
 function captureRestoreLink() {
@@ -69,12 +76,15 @@ function clearWorkspace(reason = '') {
   workspaceReady = false;
   generationPreferences.setAccount(null);
   state.cleanup?.(); state.cleanup = null;
+  if (renderedView) viewPositions.clearAccount(renderedView.account);
+  viewPositions.cancel(); renderedView = null;
   routeLoad?.cancel(); routeLoad = null;
   pageInputs?.destroy(); pageInputs = null;
   modalInputs?.destroy(); modalInputs = null;
   state.revision++;
   state.course = ''; state.courses = []; state.content = null; state.drafts.clear();
   state.library = {course:'',filter:'all',query:''}; state.reveal = false;
+  state.libraries.clear(); state.documents.clear();
   if (workspaceOpened && reason !== 'checking') {
     state.learningId = null;
     history.replaceState(null, '', location.pathname + '#home');
@@ -209,7 +219,10 @@ function go(name, id = '') {
   location.hash = hash;
 }
 function selectCourse(id) {
-  if (state.course !== id) state.library = {course:id,filter:'all',query:''};
+  if (state.course !== id) {
+    if (state.library.course) state.libraries.set(state.library.course,state.library);
+    state.library = state.libraries.get(id) || {course:id,filter:'all',query:''};
+  }
   state.course = id;
   $('#course-select').value = id;
   try { localStorage.setItem(accountCourseKey(auth.session.user?.id), id); } catch { /* Session selection remains available. */ }
@@ -267,6 +280,8 @@ function refreshPreferences() {
 }
 async function renderRoute() {
   if (!workspaceReady || !auth.session.user) return;
+  viewPositions.capture(renderedView, page);
+  renderedView = null;
   state.cleanup?.(); state.cleanup = null;
   pageInputs?.destroy(); pageInputs = null;
   routeLoad?.cancel();
@@ -287,7 +302,8 @@ async function renderRoute() {
     $('#toolbar-actions').innerHTML = result.toolbar || '';
     state.cleanup = result.bind?.() || null;
     pageInputs = mountInputControls(page);
-    window.scrollTo({top:0,behavior:'instant'});
+    renderedView = {account:auth.session.user.id,course:state.course,route:name};
+    if (!viewPositions.restore(renderedView,page)) window.scrollTo({top:0,behavior:'instant'});
   } catch (error) {
     if (revision !== state.revision || loading.signal.aborted) return;
     loading.finish();
@@ -314,13 +330,17 @@ async function renderHome(_id, read = api) {
 
 async function renderDocuments(_id, read = api) {
   if (!state.course) return courseRequired();
-  let docs = await read(courseUrl('documents')+'&include_deleted=true');
   const documentsCourse=state.course;
+  const view=state.documents.get(documentsCourse) || {filter:'all',query:''};
+  state.documents.set(documentsCourse,view);
+  let docs = await read(courseUrl('documents',documentsCourse)+'&include_deleted=true');
   return {
     toolbar:button(icon('upload')+m('导入资料'),'upload'),
     html:heading('课程资料')+`<div class="collection-tools"><div class="segmented" ${a('资料状态筛选','aria-label')}><button data-filter="all" aria-pressed="true">${m('全部 {n}',{n:docs.length})}</button><button data-filter="ready" aria-pressed="false">${m('索引就绪')}</button><button data-filter="parsed" aria-pressed="false">${m('待建索引')}</button><button data-filter="deleted" aria-pressed="false">${m('最近删除')}</button></div><label class="search"><span class="sr-only">${m('搜索文件')}</span><input id="file-search" type="search" ${a('搜索文件名称','placeholder')}></label></div><div id="files"></div>`,
     bind() {
-      let filter = 'all';
+      let filter = view.filter;
+      $('#file-search').value=view.query;
+      $$('[data-filter]').forEach(item=>item.setAttribute('aria-pressed',String(item.dataset.filter===filter)));
       const saves=new Map(),confirmed=new Map(docs.map(d=>[d.id,d.enabled!==false]));
       const paint = () => {
         const total=docs.filter(d=>!d.deleted_at).length;
@@ -339,21 +359,40 @@ async function renderDocuments(_id, read = api) {
           pending.catch(error=>{if(saves.get(id)===pending&&input.isConnected){notify(error.message);doc.enabled=confirmed.get(id);input.checked=doc.enabled;input.closest('.document-row').classList.toggle('document-inactive',!doc.enabled);}}).finally(()=>{if(saves.get(id)===pending){saves.delete(id);input.removeAttribute('aria-busy');}});
         };});
       };
-      $('#file-search').oninput = paint;
-      $$('[data-filter]').forEach(control => control.onclick = () => {filter=control.dataset.filter;$$('[data-filter]').forEach(item=>item.setAttribute('aria-pressed',String(item===control)));paint();});
+      $('#file-search').oninput = () => {view.query=$('#file-search').value;viewPositions.reset(renderedView);paint();};
+      $$('[data-filter]').forEach(control => control.onclick = () => {view.filter=filter=control.dataset.filter;viewPositions.reset(renderedView);$$('[data-filter]').forEach(item=>item.setAttribute('aria-pressed',String(item===control)));paint();});
       paint();
       return watchResource({load:({signal})=>api(courseUrl('documents',documentsCourse)+'&include_deleted=true','GET',undefined,{signal}),initial:docs,update:next=>{if(!saves.size&&JSON.stringify(docs)!==JSON.stringify(next)){docs=next;docs.forEach(d=>confirmed.set(d.id,d.enabled!==false));paint();}}});
     }
   };
 }
+const defaultGenerationDraft = () => ({material:'lesson',topic:'',difficulty:'medium',language:'zh',question_type:'mixed',count:3,check_missing_details:true});
+const generationDraftScope = course => ({kind:'generate',accountId:auth.session.user?.id,courseId:course});
+const editDraftScope = content => ({kind:'edit',accountId:auth.session.user?.id,courseId:content.course_id,contentId:content.id,baseVersion:content.version});
+function bindDraftSaver(context, statusNode, restored) {
+  let last = restored ? {state:restored.persisted?'saved':'memory',persisted:restored.persisted} : {state:'empty',persisted:true};
+  const saver=createDraftAutosave({store:draftStore,context,onStatus:status=>{
+    last=status;
+    if (!statusNode?.isConnected) return;
+    const copy={pending:'正在保存草稿…',saved:'草稿已保存在此浏览器',memory:'草稿仅暂存于当前页面',invalid:'草稿暂未保存',disabled:'草稿暂未保存',empty:''};
+    setText(statusNode,copy[status.state] || '');
+  }});
+  const protect=event=>{
+    saver.flush();
+    if (!last.persisted && last.state !== 'empty') { event.preventDefault(); event.returnValue=''; }
+  };
+  window.addEventListener('beforeunload',protect);
+  return {...saver,get status(){return last;},destroy(options){saver.destroy(options);window.removeEventListener('beforeunload',protect);}};
+}
 function draftFor(course = state.course) {
-  if (!state.drafts.has(course)) state.drafts.set(course,{material:'lesson',topic:'',difficulty:'medium',language:'zh',question_type:'mixed',count:3});
+  if (!state.drafts.has(course)) state.drafts.set(course,{...defaultGenerationDraft(),...generationDraftData(draftStore.load(generationDraftScope(course))?.data)});
   return ensureDifficultyDraft(state.drafts.get(course));
 }
 async function renderGenerate(_id, read = api) {
   if (!state.course) return courseRequired();
   const course = state.course;
   const draft = draftFor(course);
+  const draftScope = generationDraftScope(course), savedDraft = draftStore.load(draftScope);
   const [docs,status] = await Promise.all([read(courseUrl('documents',course)),read('/status')]);
   const ready = docs.filter(doc=>doc.index_current&&doc.enabled!==false).length;
   const select = (id,label,values) => `<label class="select-field">${m(label)}<select id="${id}" name="${id}">${values.map(([value,text])=>`<option value="${value}" ${String(draft[id])===value?'selected':''} data-i18n="${text}">${t(text)}</option>`).join('')}</select></label>`;
@@ -362,18 +401,21 @@ async function renderGenerate(_id, read = api) {
       <div class="writing-field"><label for="topic">${m('学习目标')}</label><textarea id="topic" name="topic" required minlength="2" ${a('输入知识点或学习目标','placeholder')}>${esc(draft.topic)}</textarea></div>
       <div class="compose-options"><div class="field-grid">${select('language','内容语言',[['zh','中文'],['en','English']])}</div><div class="field-grid" id="question-options">${select('question_type','题目形式',[['mixed','选择题与简答题'],['mcq','选择题'],['short_answer','简答题']])}<div class="number-field"><label for="count">${m('题目数量')}</label><input type="number" name="count" id="count" min="1" max="50" step="1" required value="${draft.count}"></div></div>${renderLessonDepth(draft)}</div>
       ${renderDifficultyControls(draft)}
-      ${renderExplanationOption(draft)}${renderOutputFormats()}${renderSwitch({id:'check-missing-details',label:'生成前追问',checked:true,className:'clarification-check'})}<div class="submit-bar"><button type="submit" aria-describedby="generation-eligibility">${icon('wand-sparkles')}${m('开始生成')}</button></div></form>
+      ${renderExplanationOption(draft)}${renderOutputFormats()}${renderSwitch({id:'check-missing-details',label:'生成前追问',checked:draft.check_missing_details!==false,className:'clarification-check'})}<div class="draft-tools"><span id="generation-draft-status" role="status">${savedDraft?m(savedDraft.persisted?'已恢复草稿':'草稿仅暂存于当前页面'):''}</span><button type="button" class="link" id="clear-generation-draft">${m('清空表单')}</button></div><div class="submit-bar"><button type="submit" aria-describedby="generation-eligibility">${icon('wand-sparkles')}${m('开始生成')}</button></div></form>
       <aside class="context-pane"><div class="context-title">${m('本次创作')}</div><h2 id="draft-kind"></h2><p id="draft-summary"></p><div class="context-divider"></div><div class="heading-row"><h3>${m('课程知识')}</h3><small>${m('{ready} / {total} 份就绪',{ready,total:docs.length})}</small></div>${docs.filter(doc=>doc.enabled!==false).slice(0,4).map(doc=>`<div class="context-file">${icon('file-text')}<span>${esc(doc.name)}</span></div>`).join('')||`<p>${m(docs.length?'暂无启用的资料':'尚未导入课程资料。')}</p>`}${button('管理课程资料','documents','link')}<div id="generation-eligibility" class="inline-note" role="status" hidden></div>${!status.capabilities.text.configured||!status.capabilities.embedding.configured?button('配置文本与嵌入模型','settings','link'):''}</aside></div>`,
     bind() {
       const form=$('#compose');
       const submitControl=$('button[type=submit]',form), submitLabel=submitControl.innerHTML;
       const epoch=auth.epoch, routeRevision=state.revision;
-      let flow, draftSignature='', clarificationOpen=false;
+      let flow, draftSignature='', clarificationOpen=false, submittedDraft=null;
+      const autosave=bindDraftSaver(draftScope,$('#generation-draft-status'),savedDraft);
+      let draftSnapshot=JSON.stringify(generationDraftData(draft));
       const current=()=>form.isConnected&&state.route.page==='generate'&&state.course===course&&state.revision===routeRevision&&auth.epoch===epoch;
       const eligibility=()=>generationEligibility({course,documents:docs,status,autoExplore:generationPreferences.autoExplore});
       const updateEligibility=(phase=flow?.state.phase)=>{
         const available=eligibility(), note=$('#generation-eligibility');
         submitControl.disabled=!available.allowed||['checking','submitting'].includes(phase);
+        $('#clear-generation-draft',form).disabled=['checking','submitting'].includes(phase);
         const message=available.reason||(available.exploration?(ready?'资料不足时自动查找':'将自动查找参考资料'):'');
         note.hidden=!message;
         if(message)setText(note,message);
@@ -429,6 +471,7 @@ async function renderGenerate(_id, read = api) {
           if(pending)$('#clarification-form',modal).setAttribute('aria-busy','true');else $('#clarification-form',modal).removeAttribute('aria-busy');
         }
       },onCreated:job=>{
+        if (submittedDraft===JSON.stringify(generationDraftData(draft))) { autosave.clear();state.drafts.delete(course); }
         state.library={course,filter:'all',query:''};go('progress',job.job_id);
       }});
       const modalClosed=()=>{if(clarificationOpen){clarificationOpen=false;flow.cancel();}};
@@ -440,6 +483,7 @@ async function renderGenerate(_id, read = api) {
         const data=new FormData(form);
         for (const key of ['topic','material','language','question_type']) if(data.has(key)) draft[key]=data.get(key);
         if(data.has('count')) draft.count=Number(data.get('count'));
+        draft.check_missing_details=$('#check-missing-details',form).checked;
         const lesson=draft.material==='lesson';
         $('#question-options').hidden=lesson;$('#count').disabled=lesson;$('#question_type').disabled=lesson;
         updateDifficultyControls(form,draft);
@@ -449,8 +493,15 @@ async function renderGenerate(_id, read = api) {
         const nextSignature=JSON.stringify(generationPayload(draft));
         if((draftSignature&&draftSignature!==nextSignature)||event?.target?.id==='check-missing-details')flow.cancel();
         draftSignature=nextSignature;
+        const snapshot=generationDraftData(draft), serialized=JSON.stringify(snapshot);
+        if (serialized!==draftSnapshot) { draftSnapshot=serialized;autosave.schedule(snapshot); }
       };
       form.oninput=update;form.onchange=update;update();updateEligibility();
+      if (draftSnapshot!==JSON.stringify(generationDraftData(savedDraft?.data || ensureDifficultyDraft(defaultGenerationDraft())))) autosave.schedule(generationDraftData(draft));
+      $('#clear-generation-draft').onclick=()=>{
+        if (!window.confirm(t('清空当前课程尚未提交的生成草稿？'))) return;
+        autosave.clear();state.drafts.delete(course);void renderRoute();
+      };
       bindDifficultyPresets(form,draft,update);
       const appearanceUpdated=()=>update();
       const preferencesUpdated=()=>{if(flow.state.phase!=='submitting')flow.cancel();update();updateEligibility();};
@@ -466,9 +517,11 @@ async function renderGenerate(_id, read = api) {
         $('.error-message',form)?.remove();
         if(flow.state.phase==='retry_generation'){perform(()=>flow.retry());return;}
         const snapshot={...generationPayload(draft),...generationPreferences.requestFields(draft.material),count:draft.material==='lesson'?3:draft.count,course_id:course,request_key:crypto.randomUUID()};
+        submittedDraft=JSON.stringify(generationDraftData(draft));
         perform(()=>flow.start(snapshot,{check:$('#check-missing-details',form).checked}));
       };
       return ()=>{
+        autosave.destroy();
         modal.removeEventListener('close',modalClosed);modal.removeEventListener('cancel',modalCancelled);
         window.removeEventListener('appearancechange',appearanceUpdated);
         window.removeEventListener('generationpreferenceschange',preferencesUpdated);
@@ -512,8 +565,8 @@ async function renderContents(_id, read = api) {
         replaceRows($('#generation-status'), [...activeJobs,...failedJobs].map(job=>jobRow(job,true)).join(''));
         replaceRows($('#content-list'), selected.length?`<div class="collection">${selected.map(row=>materialRow(row)).join('')}</div>`:activeJobs.length?'':empty(scoped.length?'没有匹配的内容':'暂无材料',scoped.length?'调整筛选条件或搜索名称。':'','generate','开始创作'));
       };
-      $('#content-search').oninput = () => {view.query=$('#content-search').value;paint();};
-      $$('[data-content-filter]').forEach(control=>control.onclick=()=>{view.filter=control.dataset.contentFilter;$$('[data-content-filter]').forEach(item=>item.setAttribute('aria-pressed',String(item===control)));paint();});
+      $('#content-search').oninput = () => {view.query=$('#content-search').value;viewPositions.reset(renderedView);paint();};
+      $$('[data-content-filter]').forEach(control=>control.onclick=()=>{view.filter=control.dataset.contentFilter;viewPositions.reset(renderedView);$$('[data-content-filter]').forEach(item=>item.setAttribute('aria-pressed',String(item===control)));paint();});
       paint();
       return watchResource({load:({signal})=>load(path=>api(path,'GET',undefined,{signal})),initial:data,update:next=>{data=next;paint();},error:cause=>liveError($('#library-update-error'),cause)});
     }
@@ -531,32 +584,71 @@ function renderMedia(media, review=false, version=0) {
 async function renderContent(id, read = api) {
   const content=await read('/contents/'+encodeURIComponent(id));
   const cid=encodeURIComponent(id);
+  const hasDraft=Boolean(draftStore.load(editDraftScope(content)));
   return {
     toolbar:button('返回内容库','contents','secondary'),
-    html:`${renderReviewBar(content)}<div class="review-layout"><div><article class="document-paper">${renderQuestionComparison(content)}${renderAsset(content.asset,true,content.difficulty_assessment,content.sources,{editableQuestions:true})}<div class="submit-bar"><div class="row-actions">${button('编辑内容','edit-content','secondary')}${button(content.status==='approved'?'文字已确认':'确认文字','approve-content','',content.status==='approved'?'disabled':'')}</div></div><div id="edit-panel"></div></article></div>
+    html:`${renderReviewBar(content)}<div class="draft-banner" data-edit-draft-notice ${hasDraft?'':'hidden'}><span>${m('有尚未提交的编辑草稿')}</span><div class="row-actions">${button('继续编辑','edit-content','link')}${button('丢弃草稿','discard-edit-draft','link')}</div></div><div class="review-layout"><div>${renderContentNavigation(content.asset)}<article class="document-paper">${renderQuestionComparison(content)}${renderAsset(content.asset,true,content.difficulty_assessment,content.sources,{editableQuestions:true})}<div class="submit-bar"><div class="row-actions">${button('编辑内容','edit-content','secondary')}${button(content.status==='approved'?'文字已确认':'确认文字','approve-content','',content.status==='approved'?'disabled':'')}</div></div><div id="edit-panel"></div></article></div>
       <aside class="review-inspector"><section class="inspector-section"><h2>${m('资料依据')}</h2>${renderContentSources(content.sources,content.asset)}</section>
       ${renderMultimodal(content, renderMedia)}
       ${renderDifficultyAssessment(content)}
       ${renderRatingPanel(content)}</aside></div>`,
     bind(){
       state.content=content; selectCourse(content.course_id);
+      const stopNavigation=mountContentNavigation(page);
       const stopCitations=mountCitations(page,content.sources,content.asset);
       const stopRating=bindRatingPanel(page,content,{
         save:payload=>api(`/contents/${cid}/evaluations`,'POST',payload),
         onSaved:evaluation=>{content.evaluation=evaluation;notify('当前版本的评价已保存。');}
       });
-      return ()=>{stopCitations();stopRating();};
+      return ()=>{disposeEditor();stopNavigation();stopCitations();stopRating();};
     }
   };
 }
+function disposeEditor() {
+  editorSession?.saver.destroy();
+  editorSession=null;
+}
+function updateEditorNotice() {
+  const notice=$('[data-edit-draft-notice]');
+  if (notice && state.content) notice.hidden=Boolean(editorSession) || !draftStore.load(editDraftScope(state.content));
+}
 function editContent() {
   const content=state.content, revision=state.revision;
-  const asset=structuredClone(content.asset);
+  if (!content) return;
+  if (editorSession) { $('#edit-panel').scrollIntoView({block:'start',behavior:'instant'});return; }
+  const scope=editDraftScope(content), saved=draftStore.load(scope);
+  const asset=content.asset, base=editableAssetValues(asset), restored=restoreEditValues(asset,saved?.data);
   const field=(title,path,value)=>`<label>${Array.isArray(title)?m(...title):m(title)}<textarea data-path="${path}" required>${esc(value)}</textarea></label>`;
-  $('#edit-panel').innerHTML=`<div class="edit-panel"><h3>${m('编辑版本 {n}',{n:content.version})}</h3><form id="edit-form">${field('标题','title',asset.title)}${asset.sections.map((section,index)=>field(['小节 {n} 标题',{n:index+1}],`sections.${index}.heading`,section.heading)+field(['小节 {n} 内容',{n:index+1}],`sections.${index}.text`,section.text)).join('')}${asset.questions.map((question,index)=>field(['第 {n} 题',{n:index+1}],`questions.${index}.stem`,question.stem)+question.options.map((option,i)=>field(['选项 {letter}',{letter:String.fromCharCode(65+i)}],`questions.${index}.options.${i}`,option)).join('')+field('参考答案',`questions.${index}.answer`,question.answer)+field('答案解析',`questions.${index}.explanation`,question.explanation)).join('')}<label>${m('配图描述')}<textarea data-path="visual_prompt">${esc(asset.visual_prompt)}</textarea></label><div class="modal-actions">${button('取消编辑','cancel-edit','secondary','type="button"')}<button type="submit">${m('保存新版本')}</button></div></form></div>`;
+  $('#edit-panel').innerHTML=`<div class="edit-panel"><h3>${m('编辑版本 {n}',{n:content.version})}</h3><div class="draft-tools"><span id="edit-draft-status" role="status">${saved?m(saved.persisted?'已恢复草稿':'草稿仅暂存于当前页面'):''}</span>${button('丢弃草稿','discard-edit-draft','link','type="button"')}</div><form id="edit-form">${field('标题','title',asset.title)}${asset.sections.map((section,index)=>field(['小节 {n} 标题',{n:index+1}],`sections.${index}.heading`,section.heading)+field(['小节 {n} 内容',{n:index+1}],`sections.${index}.text`,section.text)).join('')}${asset.questions.map((question,index)=>field(['第 {n} 题',{n:index+1}],`questions.${index}.stem`,question.stem)+question.options.map((option,i)=>field(['选项 {letter}',{letter:String.fromCharCode(65+i)}],`questions.${index}.options.${i}`,option)).join('')+field('参考答案',`questions.${index}.answer`,question.answer)+field('答案解析',`questions.${index}.explanation`,question.explanation)).join('')}<label>${m('配图描述')}<textarea data-path="visual_prompt">${esc(asset.visual_prompt)}</textarea></label><div class="modal-actions">${button('收起编辑','cancel-edit','secondary','type="button"')}<button type="submit">${m('保存新版本')}</button></div></form></div>`;
+  const form=$('#edit-form'), controls=$$('[data-path]',form);
+  for (const input of controls) input.value=restored[input.dataset.path];
+  const values=()=>Object.fromEntries(controls.map(input=>[input.dataset.path,input.value]));
+  const saver=bindDraftSaver(scope,$('#edit-draft-status'),saved);
+  editorSession={saver,scope,contentId:content.id};
+  updateEditorNotice();
+  form.oninput=()=>{const next=values();if(Object.keys(base).every(key=>next[key]===base[key]))saver.clear();else saver.schedule(next);};
   pageInputs?.refresh();
   $('#edit-panel').scrollIntoView({block:'start',behavior:'instant'});
-  $('#edit-form').onsubmit=event=>{event.preventDefault();const form=event.currentTarget;busy($('button[type=submit]',form),async()=>{$$('[data-path]',form).forEach(input=>{const keys=input.dataset.path.split('.');let target=asset;for(const key of keys.slice(0,-1))target=target[key];target[keys.at(-1)]=input.value;});await api(`/contents/${encodeURIComponent(content.id)}/review`,'POST',{version:content.version,action:'save',asset});if(revision!==state.revision)return;notify('新版本已保存，请重新审核。');await renderRoute();},form);};
+  controls[0]?.focus({preventScroll:true});
+  form.onsubmit=event=>{
+    event.preventDefault();
+    if (!form.reportValidity()) return;
+    const snapshot=values();saver.flush();
+    busy($('button[type=submit]',form),async()=>{
+      const disabled=[...form.elements].map(control=>[control,control.disabled]);
+      for (const [control] of disabled) control.disabled=true;
+      try {
+        await api(`/contents/${encodeURIComponent(content.id)}/review`,'POST',{version:content.version,action:'save',asset:applyEditValues(asset,snapshot)});
+        // Clear this exact base-version draft, including when the user navigated
+        // away while the save request was completing.
+        saver.cancel();
+        if (editorSession && draftKey(editorSession.scope)===draftKey(scope)) editorSession.saver.flush();
+        clearSubmittedEditDraft(draftStore,scope,snapshot);
+        if(revision!==state.revision)return;
+        notify('新版本已保存，请重新审核。');await renderRoute();
+      } finally { for(const [control,wasDisabled] of disabled)control.disabled=wasDisabled; }
+    },form);
+  };
 }
 async function renderProgress(id, read = api) {
   const revision = state.revision;
@@ -576,8 +668,8 @@ async function renderPartial(id, read = api) {
   const partial = await read(`/jobs/${encodeURIComponent(id)}/partial-content`);
   return {
     toolbar:button('返回任务','job-details','secondary',`data-id="${esc(id)}"`),
-    html:`<div class="partial-content-heading"><h1>${m('已完成题目')}</h1><p>${m('已完成 {done} / {total} 题',{done:partial.completed,total:partial.total})}<span aria-hidden="true"> · </span>${m('部分结果，尚未完整生成')}</p></div><article class="document-paper partial-content">${renderAsset(partial.asset,true,null,partial.sources,{originalQuestionNumbers:true})}<details class="partial-sources"><summary>${m('资料依据')}</summary>${renderContentSources(partial.sources,partial.asset)}</details></article>`,
-    bind() { return mountCitations(page,partial.sources,partial.asset); }
+    html:`<div class="partial-content-heading"><h1>${m('已完成题目')}</h1><p>${m('已完成 {done} / {total} 题',{done:partial.completed,total:partial.total})}<span aria-hidden="true"> · </span>${m('部分结果，尚未完整生成')}</p></div>${renderContentNavigation(partial.asset,{originalQuestionNumbers:true})}<article class="document-paper partial-content">${renderAsset(partial.asset,true,null,partial.sources,{originalQuestionNumbers:true})}<details class="partial-sources"><summary>${m('资料依据')}</summary>${renderContentSources(partial.sources,partial.asset)}</details></article>`,
+    bind() { const stopCitations=mountCitations(page,partial.sources,partial.asset), stopNavigation=mountContentNavigation(page);return ()=>{stopCitations();stopNavigation();}; }
   };
 }
 
@@ -594,7 +686,7 @@ async function renderJobs(_id, read = api) {
 async function renderLearning(_id, read = api) {
   document.body.classList.add('learning');
   const data=await read(`/learn/${encodeURIComponent(state.learningId)}?reveal_answers=${Boolean(state.reveal)}`);
-  return {html:`<article class="document-paper">${renderAsset(data.asset,false)}${!state.reveal&&data.asset.questions.length?`<div class="submit-bar">${button('查看答案与解析','reveal')}</div>`:''}${renderMedia(data.media)}</article>`};
+  return {html:`${renderContentNavigation(data.asset)}<article class="document-paper">${renderAsset(data.asset,false)}${!state.reveal&&data.asset.questions.length?`<div class="submit-bar">${button('查看答案与解析','reveal')}</div>`:''}${renderMedia(data.media)}</article>`,bind(){return mountContentNavigation(page);}};
 }
 const renderers={home:renderHome,documents:renderDocuments,generate:renderGenerate,contents:renderContents,jobs:renderJobs,progress:renderProgress,content:renderContent,partial:renderPartial,learning:renderLearning};
 
@@ -709,7 +801,12 @@ const actions={
     };
   },
   'edit-content':editContent,
-  'cancel-edit':()=>{$('#edit-panel').innerHTML='';},
+  'cancel-edit':()=>{disposeEditor();$('#edit-panel').innerHTML='';pageInputs?.refresh();updateEditorNotice();},
+  'discard-edit-draft':()=>{
+    if (!state.content || !window.confirm(t('丢弃此版本尚未提交的编辑草稿？'))) return;
+    editorSession?.saver.clear();disposeEditor();draftStore.remove(editDraftScope(state.content));
+    $('#edit-panel').innerHTML='';pageInputs?.refresh();updateEditorNotice();
+  },
   'make-media':async control=>{const revision=state.revision,content=state.content;const job=await api(`/contents/${encodeURIComponent(content.id)}/media`,'POST',{version:content.version,kind:control.dataset.kind,request_key:crypto.randomUUID()});if(revision===state.revision)go('progress',job.job_id);},
   'approve-media':async control=>{const revision=state.revision;await api(`/media/${encodeURIComponent(control.dataset.id)}/approve`,'POST',{version:Number(control.dataset.version)});if(revision!==state.revision)return;notify('媒体内容已确认。');await renderRoute();},
   reveal:async()=>{state.reveal=true;await renderRoute();}

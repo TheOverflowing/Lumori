@@ -1,20 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { generationProgressView, renderGenerationProgress, mountGenerationProgress, watchGenerationProgress, durationText, eventMessage, progressSelection } from '../app/static/generation-progress.js';
+import { generationProgressView, generationProgressMeter, renderGenerationProgress, mountGenerationProgress, watchGenerationProgress, durationText, eventMessage, progressSelection } from '../app/static/generation-progress.js';
 
 globalThis.document = {documentElement:{lang:'zh-CN'}};
 const stage = (id, status) => ({id, kind:id, status});
 const job = (extra = {}) => ({id:'task1', kind:'generate', status:'running', timeline:{version:'job-progress-v1', recorded:true, stages:[stage('retrieval','completed'),stage('writing','active'),stage('saving','pending')],active_stage:'writing',activity:'reviewing',completed:1,total:3,unit:'questions'}, ...extra});
 
-test('shows confirmed activity and checked question counts without a percent or time estimate', () => {
+test('shows confirmed workflow progress and checked question counts without a time estimate', () => {
   const model = generationProgressView(job());
   assert.equal(model.title,'正在检查内容');
   assert.deepEqual(model.counter,{done:1,total:3});
   assert.equal(model.terminal,false);
   const html = renderGenerationProgress(job());
   assert.match(html,/已检查 1 \/ 3 题/);
-  assert.doesNotMatch(html,/aria-valuenow|\d+%|ETA/);
+  assert.match(html,/role="progressbar"/);
+  assert.match(html,/aria-valuenow="44"/);
+  assert.doesNotMatch(html,/\d+%|ETA/);
   assert.match(html,/aria-current="step"/);
 });
 
@@ -26,6 +28,64 @@ test('all questions checked still waits for an actual success before offering th
   const completed = {...running,status:'succeeded'};
   assert.equal(generationProgressView(completed).terminal,true);
   assert.match(renderGenerationProgress(completed),/data-action="open-content" data-id="premature"/);
+});
+
+test('meter uses completed steps and accepted questions, never elapsed time or attempts', () => {
+  const measure = value => generationProgressMeter(generationProgressView(value));
+  const initial = job(), before = measure(initial);
+  assert.equal(before.value,44);
+  assert.deepEqual(before.summary.values,{done:1,total:3});
+  assert.equal(measure(job({timeline:{...initial.timeline,completed:2}})).value,55);
+  assert.deepEqual(measure(job({timeline:{...initial.timeline,elapsed_ms:999999,activity:'repairing',
+    events:[{id:1,stage:'writing',code:'question_started',data:{number:3,total:3}}]}})),before);
+  const checked = job({timeline:{...initial.timeline,completed:3}});
+  assert.equal(measure(checked).value,66,'all questions still leave saving unfinished');
+  assert.equal(measure({...checked,status:'succeeded'}).value,100);
+  const allStagesDone = job({timeline:{...initial.timeline,stages:initial.timeline.stages.map(s=>({...s,status:'completed'}))}});
+  assert.equal(measure(allStagesDone).value,99,'full completion needs the persisted job success');
+});
+
+test('meter preserves partial work on interruption and resume, and supports lessons and future modalities', () => {
+  const measure = value => generationProgressMeter(generationProgressView(value));
+  for (const status of ['failed','insufficient_evidence','cancelled','queued']) {
+    assert.equal(measure(job({status})).value,44);
+  }
+  for (const kind of ['audio','image','video','future_modality']) {
+    const timeline={recorded:true,stages:[stage('retrieval','completed'),stage(kind,'active'),stage('saving','pending')]};
+    assert.equal(measure(job({timeline})).value,33);
+    assert.equal(measure(job({timeline:{...timeline,unit:'questions',total:0,completed:0}})).value,33);
+  }
+  for (const status of ['running','queued','failed','cancelled']) {
+    const legacy=job({status,timeline:{recorded:false,stages:[]}});
+    assert.equal(measure(legacy).value,null);
+    assert.doesNotMatch(renderGenerationProgress(legacy),/aria-valuenow=/);
+  }
+  assert.equal(measure(job({status:'succeeded',timeline:{recorded:false}})).value,100);
+});
+
+test('both layouts localize progress labels and patch the same bar without remounting it', () => {
+  try {
+    document.documentElement.lang='en';
+    for(const mode of ['simple','detailed']) {
+      const initial=job(), root=mode==='simple'?mockRoot():detailedRoot(initial);
+      const html=renderGenerationProgress(initial,{mode});
+      assert.match(html,/aria-label="Generation progress"/);
+      assert.match(html,/1 of 3 steps complete/);
+      const controller=mountGenerationProgress(root,initial,{mode});
+      const track=root.querySelector('[data-progress-meter-track]'), fill=root.querySelector('[data-progress-meter-fill]');
+      controller.update(job({timeline:{...initial.timeline,completed:2}}));
+      assert.equal(track.attrs.get('aria-valuenow'),'55');
+      assert.equal(fill.style.transform,'scaleX(0.55)');
+      controller.connection(new Error('offline'));
+      assert.equal(fill.style.transform,'scaleX(0.55)','connection errors retain last confirmed progress');
+      controller.update(job({status:'succeeded',result:{content_id:'saved'}}));
+      assert.equal(track.attrs.get('aria-valuenow'),'100');
+      assert.equal(root.querySelector('[data-progress-meter-summary]').textContent,'Task completed');
+      assert.equal(root.querySelector('[data-progress-meter-track]'),track);
+      assert.equal(root.querySelector('[data-progress-meter]').writes,0);
+      controller.destroy();
+    }
+  } finally { document.documentElement.lang='zh-CN'; }
 });
 
 test('legacy jobs show their real status without inventing stages or a denominator', () => {
@@ -204,10 +264,12 @@ test('titles and action text switch language while untrusted identifiers remain 
 
 function element() {
   let html = '', writes = 0;
-  return {dataset:{},hidden:false,textContent:'',get innerHTML(){return html;},set innerHTML(value){html=value;writes++;},get writes(){return writes;}};
+  const attrs = new Map();
+  return {dataset:{},style:{},attrs,setAttribute:(name,value)=>attrs.set(name,value),removeAttribute:name=>attrs.delete(name),hidden:false,textContent:'',get innerHTML(){return html;},set innerHTML(value){html=value;writes++;},get writes(){return writes;}};
 }
+const meterSelectors = ['[data-progress-meter]','[data-progress-meter-track]','[data-progress-meter-fill]','[data-progress-meter-summary]'];
 function mockRoot() {
-  const elements = new Map(['#generation-progress-title','[data-progress-icon]','[data-progress-count]','[data-progress-message]','[data-progress-reason]','[data-progress-stages]','[data-progress-actions]','[data-progress-connection]'].map(selector=>[selector,element()]));
+  const elements = new Map([...meterSelectors,'#generation-progress-title','[data-progress-icon]','[data-progress-count]','[data-progress-message]','[data-progress-reason]','[data-progress-stages]','[data-progress-actions]','[data-progress-connection]'].map(selector=>[selector,element()]));
   layerContainer(elements.get('[data-progress-icon]'),['retrieval','writing','saving','check','paused'],'writing');
   return {dataset:{},querySelector:selector=>elements.get(selector)};
 }
@@ -293,7 +355,7 @@ test('temporary polling failure retries and recovers even when job contents do n
 
 test('generation and media creation route to progress, while course changes leave the task context', () => {
   const source=readFileSync('app/static/app.js','utf8');
-  assert.match(source,/onCreated:job=>\{\s*state\.library=.*?go\('progress',job\.job_id\)/s);
+  assert.match(source,/onCreated:job=>\{.*?state\.library=.*?go\('progress',job\.job_id\)/s);
   assert.match(source,/\['progress','partial'\]\.includes\(name\) \? 'jobs'/);
   assert.match(source,/else if\(\['progress','partial'\]\.includes\(state\.route\.page\)\)go\('jobs'\)/);
   assert.match(source,/make-media.*?go\('progress',job\.job_id\)/);
@@ -449,7 +511,7 @@ function richElement() {
   return node;
 }
 function detailedRoot(initial) {
-  const selectors=['#generation-progress-title','#generation-stage-title','[data-progress-count]','[data-progress-total-time]','[data-progress-selected-time]','[data-progress-message]','[data-progress-reason]','[data-progress-actions]','[data-progress-connection]','[data-progress-truncated]','[data-progress-visual]','[data-progress-stage-headline]','[data-progress-events]','[data-progress-follow]'];
+  const selectors=[...meterSelectors,'#generation-progress-title','#generation-stage-title','[data-progress-count]','[data-progress-total-time]','[data-progress-selected-time]','[data-progress-message]','[data-progress-reason]','[data-progress-actions]','[data-progress-connection]','[data-progress-truncated]','[data-progress-visual]','[data-progress-stage-headline]','[data-progress-events]','[data-progress-follow]'];
   const elements=new Map(selectors.map(selector=>[selector,richElement()]));
   const layers=layerContainer(elements.get('[data-progress-visual]'),[...new Set(initial.timeline.stages.map(stage=>stage.kind))],initial.timeline.active_stage);
   const rows=initial.timeline.stages.map(stage=>{

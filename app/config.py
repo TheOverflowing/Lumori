@@ -98,6 +98,16 @@ class Settings:
     generation_workflow: str = 'legacy_v3'
     agent_max_calls: int = 180
     agent_max_repairs: int = 1
+    difficulty_shadow_mode: str = 'off'
+    difficulty_shadow_protocol: str = 'review_v2'
+    difficulty_shadow_analyst_model: str = ''
+    difficulty_shadow_analyst_effort: str = 'none'
+    difficulty_shadow_verifier_model: str = ''
+    difficulty_shadow_verifier_effort: str = 'none'
+    difficulty_shadow_max_calls: int = 2
+    difficulty_shadow_max_questions: int = 1
+    difficulty_shadow_timeout: float = 30
+    difficulty_shadow_repeat_disagreements: bool = False
     agent_context_chars: int = 48000
     # Optional candidate runtime. Native remains the measured/default workflow.
     agent_runtime: str = 'native'
@@ -187,6 +197,16 @@ class Settings:
                    exploration_fetch_timeout=max(1,min(30,float(os.getenv('EXPLORATION_FETCH_TIMEOUT','20')))),
                    generation_workflow=os.getenv('GENERATION_WORKFLOW', 'agent_v1'),
                    agent_max_calls=max(1, min(300, int(os.getenv('AGENT_MAX_CALLS', '180')))),
+                   difficulty_shadow_mode=os.getenv('DIFFICULTY_SHADOW_MODE', 'off'),
+                   difficulty_shadow_protocol=os.getenv('DIFFICULTY_SHADOW_PROTOCOL', 'review_v2'),
+                   difficulty_shadow_analyst_model=os.getenv('DIFFICULTY_SHADOW_ANALYST_MODEL', ''),
+                   difficulty_shadow_analyst_effort=os.getenv('DIFFICULTY_SHADOW_ANALYST_EFFORT', 'none'),
+                   difficulty_shadow_verifier_model=os.getenv('DIFFICULTY_SHADOW_VERIFIER_MODEL', ''),
+                   difficulty_shadow_verifier_effort=os.getenv('DIFFICULTY_SHADOW_VERIFIER_EFFORT', 'none'),
+                   difficulty_shadow_max_calls=max(0, min(12, int(os.getenv('DIFFICULTY_SHADOW_MAX_CALLS', '2')))),
+                   difficulty_shadow_max_questions=max(1, min(5, int(os.getenv('DIFFICULTY_SHADOW_MAX_QUESTIONS', '1')))),
+                   difficulty_shadow_timeout=max(1, min(120, float(os.getenv('DIFFICULTY_SHADOW_TIMEOUT', '30')))),
+                   difficulty_shadow_repeat_disagreements=os.getenv('DIFFICULTY_SHADOW_REPEAT_DISAGREEMENTS', 'false').lower() in ('true','1','yes'),
                    agent_max_repairs=max(0, min(2, int(os.getenv('AGENT_MAX_REPAIRS', '1')))),
                    agent_context_chars=max(4000, min(100000, int(os.getenv('AGENT_CONTEXT_CHARS', '48000')))),
                    agent_runtime=os.getenv('AGENT_RUNTIME', 'native'),

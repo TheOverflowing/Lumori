@@ -16,6 +16,8 @@ import sqlite3
 import stat
 import sys
 from threading import Lock
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from .answer_tools import TOOL_CONTRACTS, run_answer_tool
@@ -25,11 +27,12 @@ MANIFEST_SCHEMA = 'teaching-harness-tools-v1'
 AUDIT_SCHEMA = 'teaching-harness-audit-v1'
 TIMELINE_LIMIT = 40
 _MANIFEST_FIELDS = {'schema', 'job_id', 'data_dir', 'course_id',
-                    'enforce_account_ownership', 'owner_id', 'sources', 'audit_path'}
+                    'enforce_account_ownership', 'owner_id', 'sources', 'audit_path',
+                    'search_endpoint'}
 _MESSAGES = {
     'task_cancelled': 'This job was cancelled. No further teaching tools will run.',
     'scope_denied': 'This job or its reference documents are no longer available in the authorized scope.',
-    'invalid_input': 'Invalid cpu_schedule_v1 input; follow the published tool schema.',
+    'invalid_input': 'Invalid teaching tool input; follow the published tool schema.',
     'unavailable': 'The teaching tool is temporarily unavailable.',
     'audit_unavailable': 'The teaching tool could not preserve its audit record.',
 }
@@ -68,7 +71,7 @@ class ScopedTeachingTools:
             if type(manifest) is not dict or set(manifest) - _MANIFEST_FIELDS:
                 raise ValueError
             manifest = _json_copy(manifest)
-            required = _MANIFEST_FIELDS - {'owner_id'}
+            required = _MANIFEST_FIELDS - {'owner_id', 'search_endpoint'}
             if not required <= set(manifest) or manifest['schema'] != MANIFEST_SCHEMA:
                 raise ValueError
             if type(manifest['enforce_account_ownership']) is not bool:
@@ -86,6 +89,13 @@ class ScopedTeachingTools:
                 raise ValueError
             if audit_path.resolve() == (data_dir / 'studio.sqlite3').resolve():
                 raise ValueError
+            if 'search_endpoint' in manifest:
+                endpoint = urlsplit(manifest['search_endpoint'])
+                if (endpoint.scheme != 'http' or endpoint.hostname != '127.0.0.1'
+                        or not endpoint.port or endpoint.path != '/v1/tools/search'
+                        or endpoint.username or endpoint.password or endpoint.query
+                        or endpoint.fragment):
+                    raise ValueError
             sources = manifest['sources']
             if type(sources) is not list:
                 raise ValueError
@@ -229,6 +239,30 @@ class ScopedTeachingTools:
             'limitations': deepcopy(TOOL_CONTRACTS['cpu_schedule_v1']['limitations']),
         })
 
+    def search_web(self, query: str, language: str) -> dict:
+        """Ask the parent controller to search approved public concept terms."""
+        if 'search_endpoint' not in self._manifest:
+            return _error('unavailable')
+
+        def compute():
+            if not isinstance(query, str) or not isinstance(language, str):
+                raise ValueError
+            token = os.environ.get('FYP_HARNESS_PROXY_TOKEN', '')
+            if not token:
+                raise ValueError
+            request = Request(self._manifest['search_endpoint'],
+                data=json.dumps({'query': query, 'language': language}).encode(),
+                headers={'Authorization': 'Bearer ' + token,
+                         'Content-Type': 'application/json'}, method='POST')
+            with urlopen(request, timeout=35) as response:
+                payload = response.read(32_000)
+            value = json.loads(payload)
+            if not isinstance(value, dict) or not isinstance(value.get('candidates'), list):
+                raise ValueError
+            return value
+
+        return self._call('search_web', {'query': query, 'language': language}, compute)
+
 
 def create_server(core: ScopedTeachingTools):
     """The only optional dependency is imported when starting an MCP server."""
@@ -240,6 +274,13 @@ def create_server(core: ScopedTeachingTools):
     server = FastMCP('Scoped teaching tools', instructions=(
         'Only frozen references and bounded CPU calculations for the authorized job are available. '
         'Calculations validate supplied parameters, not their agreement with the question.'))
+
+    if 'search_endpoint' in core._manifest:
+        @server.tool(name='search_web')
+        def search_web(query: str, language: str) -> dict:
+            """Search approved public concept terms; results are candidate URLs only."""
+            return core.search_web(query, language)
+        return server
 
     @server.tool(name='get_reference_chunks')
     def get_reference_chunks() -> dict:

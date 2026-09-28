@@ -96,7 +96,9 @@ def test_job_metadata_resolves_index_generation_and_failed_media_without_payload
         detail = client.get('/api/jobs/' + row['id']).json()
         assert detail['course_id'] == course and detail['content_id'] == expected[row['id']]
         assert set(detail) == set(row) | {'result', 'updated_at', 'timeline',
-                                         'cancellable', 'cancel_requested', 'partial_available'}
+                                         'cancellable', 'cancel_requested', 'partial_available',
+                                         'difficulty_shadow'}
+        assert detail['difficulty_shadow'] is None
         assert not detail['cancellable'] and not detail['cancel_requested'] and not detail['partial_available']
         timeline = detail['timeline']
         assert set(timeline) == {'version', 'recorded', 'stages', 'active_stage', 'activity',

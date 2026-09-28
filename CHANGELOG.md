@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-28 — application sync
+
+- Add browser draft recovery, list return positions and section/question navigation.
+- Extend optional Harness coverage to exploration and lessons, with candidate evidence IDs and isolated per-question recovery.
+- Add the opt-in review_v2 difficulty observer; keep it off by default and non-enforcing.
+- Sync application regression tests and refresh setup, defaults and validation boundaries in the README.
+- Archive research experiments separately in lumori-fyp; preserve the existing deployment configuration.
+
 ## v0.3.0 — 2026-09-24
 
 - Add cancellation/recovery, passed partial results and version-checked question revision.
